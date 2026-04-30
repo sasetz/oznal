@@ -833,6 +833,7 @@ ggplot(rf_preds) +
     labs(title = "Distribution of Actual vs. Predicted Values")
 
 
+
 #---- 5. SVM ----
 svm_recipe <- final_recipe %>%
   step_naomit(has_role("outcome")) %>%
@@ -843,23 +844,22 @@ svm_recipe <- final_recipe %>%
   step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
   #step_nzv(all_predictors(), freq_cut = 99/1, unique_cut = 5)%>%
   step_corr(all_numeric_predictors(), threshold = 0.7) %>%
-  step_normalize(all_numeric_predictors()) %>%
-  step_pca(all_numeric_predictors(), threshold = 0.7)
+  step_normalize(all_numeric_predictors())
+#step_pca(all_numeric_predictors(), threshold = 0.99)
 
 
 
 prepared_recipe <- svm_recipe %>% prep()
 
-# 2. Дивимось, які колонки залишилися в результаті
 colnames(bake(prepared_recipe, new_data = NULL))
 
 show_engines("svm_linear")
 library(LiblineaR)
 swm <- svm_linear(
-  cost = 10,
-  margin = 0.01
-) %>%
-  set_engine("LiblineaR") %>%
+  cost = 10,               
+  margin = 0.01        
+) %>% 
+  set_engine("LiblineaR") %>% 
   set_mode("regression")
 
 
@@ -872,8 +872,8 @@ workflow() %>%
 swm_fit_result %>% collect_metrics()
 swm_fit_result %>% collect_predictions()
 
-swm_fit_result %>%
-  collect_predictions() %>%
+swm_fit_result %>% 
+  collect_predictions() %>% 
   ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
   geom_abline(lty = 2, color = "red") +
   geom_point(alpha = 0.1) +
@@ -884,3 +884,37 @@ swm_fit_result %>%
 
 swm_fit_result %>% extract_workflow()
 
+library(vip)
+library(ggplot2)
+
+model_obj <- swm_fit_result %>% 
+  extract_fit_parsnip()
+
+weights <- model_obj$fit$W
+
+importance_df <- data.frame(
+  Variable = colnames(weights),
+  Importance = as.vector(weights)
+  ) %>%
+  filter(Variable != "Bias") 
+
+top_10 <- importance_df %>%
+  slice_max(abs(Importance), n = 10) %>%
+  mutate(Variable = reorder(Variable, Importance))
+top_10 
+
+
+ggplot(top_10, aes(x = Importance, y = Variable, fill = Importance > 0)) +
+  geom_col() +
+  scale_fill_manual(
+    values = c("firebrick", "steelblue"), 
+    labels = c("Negative Impact", "Positive Impact")
+  ) +
+  labs(
+    title = "Top 10 Feature Importance (SVM)",
+    subtitle = "Factors affecting yearly compensation",
+    x = "Model Coefficient (Weight)",
+    y = NULL,
+    fill = "Impact"
+  ) +
+  theme_minimal()
