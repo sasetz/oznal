@@ -2,6 +2,7 @@ library(tidyverse)
 library(infotheo)
 library(GGally)
 library(tidymodels)
+install.packages(c("tidyverse", "tidymodels", "infotheo", "GGally", "ranger"))
 rm(list = ls())
 set.seed(124)
 
@@ -736,7 +737,7 @@ paste(country_list2, sep = "\n")
 cat(paste0('"', country_list2, '"', collapse = ", "))
 
 show_engines("linear_reg")
-lr_spec <- linear_reg() %>% set_engine("lm")
+lr_spec <- linear_reg(engine = "lm")
 lr_metrics <- metric_set(rmse, mae, rsq)
 
 workflow() %>%
@@ -775,19 +776,61 @@ lm_fit_result %>%
 #---- 4. Random forest ----
 
 # The next model we've chosen is random forest. We have a lot of rows to train
-# on, so there isn't much sense in using a single decision tree
+# on, a lot of variables and noise, so we'll use random forest rather than a
+# decision tree.
 
 rf_recipe <- final_recipe %>%
     step_naomit(has_role("outcome")) %>%
+    step_log(all_outcomes()) %>%
     step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
-    step_rm(Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
-    step_dummy(has_role("nominal"), one_hot = TRUE) %>%
-    step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
-    step_ordinalscore(has_role("ordinal"), -c("JobSat"))
+    #step_rm(Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
+    #step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+    #step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
+    step_integer(has_role("nominal"))
 
+rf_spec <- rand_forest(
+    mode = "regression",
+    engine = "ranger",
+    trees = 1000,
+    mtry = 10,
+    min_n = 7)
+rf_metrics <- metric_set(mse, mae, mape, rmse)
 
+rf_preds %>%
+    mutate(abs_perc_err = abs((ConvertedCompYearly - .pred) / ConvertedCompYearly)) %>%
+    arrange(desc(abs_perc_err)) %>%
+    head(10) %>%
+    View()
 
+rf_preds %>%
+    arrange(desc(ConvertedCompYearly)) %>%
+    View()
 
+set.seed(142)
+rf_data_split <- data_cleaned %>%
+    mutate(ConvertedCompYearly = log(ConvertedCompYearly)) %>%
+    initial_split(prop = .8)
+
+workflow() %>%
+    add_recipe(rf_recipe) %>%
+    add_model(rf_spec) %>%
+    last_fit(data_split, metrics = rf_metrics) -> rf_fit_result
+
+rf_fit_result %>%
+    collect_metrics()
+
+rf_preds <- rf_fit_result %>% collect_predictions()
+
+rf_fit_result %>%
+    collect_
+
+ggplot(rf_preds) +
+    geom_density(aes(x = ConvertedCompYearly, fill = "Actual"), alpha = 0.4) +
+    geom_density(aes(x = .pred, fill = "Predicted"), alpha = 0.4) +
+    scale_fill_manual(values = c("Actual" = "black", "Predicted" = "blue")) +
+    theme_minimal() +
+    labs(title = "Distribution of Actual vs. Predicted Values")
 
 
 #---- 5. SVM ----
@@ -813,10 +856,10 @@ colnames(bake(prepared_recipe, new_data = NULL))
 show_engines("svm_linear")
 library(LiblineaR)
 swm <- svm_linear(
-  cost = 10,               
-  margin = 0.01        
-) %>% 
-  set_engine("LiblineaR") %>% 
+  cost = 10,
+  margin = 0.01
+) %>%
+  set_engine("LiblineaR") %>%
   set_mode("regression")
 
 
@@ -829,8 +872,8 @@ workflow() %>%
 swm_fit_result %>% collect_metrics()
 swm_fit_result %>% collect_predictions()
 
-swm_fit_result %>% 
-  collect_predictions() %>% 
+swm_fit_result %>%
+  collect_predictions() %>%
   ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
   geom_abline(lty = 2, color = "red") +
   geom_point(alpha = 0.1) +
@@ -840,3 +883,4 @@ swm_fit_result %>%
   theme_minimal()
 
 swm_fit_result %>% extract_workflow()
+
