@@ -7,18 +7,52 @@ set.seed(124)
 
 #---- 1. Load data ----
 
-setwd("~/studium/8 semester/oznal/project")
-schema <- read_csv("data/survey_results_schema.csv", show_col_types = FALSE)
-data <- read_csv("data/survey_results_public.csv", show_col_types = FALSE)
+# setwd("~/studium/8 semester/oznal/project")
+# schema <- read_csv("data/survey_results_schema.csv", show_col_types = FALSE)
+# data <- read_csv("data/survey_results_public.csv", show_col_types = FALSE)
+schema <- read_csv("survey_results_schema.csv", show_col_types = FALSE)
+data <- read_csv("survey_results_public.csv", show_col_types = FALSE)
 
 dir.create("output", showWarnings = FALSE)
 dir.create(file.path("output", "plots"), recursive = TRUE, showWarnings = FALSE)
-
+View(schema)
+View(data)
 cat("Rows:", nrow(data), ", Cols:", ncol(data), "\n")
 
 #---- 2. EDA and Data Cleaning ----
 
 # First, let's see what variables we're working with
+data %>%
+  summarise(across(everything(), list(
+    class = ~ class(.x)[1],
+    missing = ~ sum(is.na(.x) | .x == ""),
+    n_unique = ~ n_distinct(.x, na.rm = TRUE),
+    n = ~ sum(!is.na(.x) & .x != ""),
+    variance = ~ var(.x, na.rm = TRUE)
+  ))) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("variable", ".value"),
+    names_pattern = "(.*)_(class|missing|n_unique|n|variance)"
+  ) %>%
+  View()
+
+# Clean the target variable by removing rows with na values.
+# In the 'Employment' and 'Devtype' columns, there are many illogical values,
+# such as 'unemployed' with a filled 'devtype' field. We remove all such records,
+# keeping only those where the person is employed and has devtype.
+data <- data %>%
+  drop_na(ConvertedCompYearly) %>%
+  filter(ConvertedCompYearly > 0) %>%
+  filter(DevType != 'Student',
+         DevType != 'Retired',
+         DevType != 'Other (please specify):' ) %>%
+  filter(Employment != 'Retired',
+         Employment != 'Not employed',
+         Employment != 'I prefer not to say' )
+
+
+# After basic cleaning
 data %>%
     summarise(across(everything(), list(
         class = ~ class(.x)[1],
@@ -28,22 +62,84 @@ data %>%
         variance = ~ var(.x, na.rm = TRUE)
     ))) %>%
     pivot_longer(
-        everything(), 
-        names_to = c("variable", ".value"), 
+        everything(),
+        names_to = c("variable", ".value"),
         names_pattern = "(.*)_(class|missing|n_unique|n|variance)"
     ) %>%
 View()
 
-# Define a few helper functions for exploring variables, their distributions
 
+# COLUMNS OVERVIEW
+# ---
+
+# The dataset is quite messy, as it is a survey with a lot of open-ended
+# questions, multi-choice, rating, and matrix questions. We’ve observed that
+# many columns have more than 50% missing values, making it unwise to handle them.
+# Therefore, we will focus on columns with less than 50% missing data. The variables
+# can be grouped into rough groups on how they can be handled:
+# - drop_columns: open-ended questions, ResponseId and CompTotal. Reasoning for removing CompTotal is that we will use ConvertedCompYearly instead, which is directly calculated from CompTotal
+# - multifactor_columns: ordinal variables that need splitting into multiple features
+# - rate_column_prefixes: prefixes for rating questions
+# - multichoice_columns: multi-choice questions that need splitting into multiple features
+# - tech_usage_column_prefixes: prefixes for columns that indicate the usage of a certain technology. These require substantial cleaning, since they are most likely to contain a lot of noise
+# - double_multichoice_prefixes: multi-choice questions that will be converted as regular multi-choices, but each option will be an ordinal feature. See further sections for more info
+
+# Our aim is to predict the total annual salary based on various predictors
+# and identify the most significant ones. Since we have 150 columns, we
+# first logically select 37 columns that are likely to influence ConvertedCompYearly.
+# The survey contains many different types of questions, so some of them may not be
+# relevant.
+nominal_columns <- c("MainBranch", "EdLevel", "Employment",
+                     "DevType", "ICorPM", "RemoteWork",
+                     "Industry", "Country")
+ordinal_columns <- c("Age", "OrgSize", "AIThreat", "SOAccount", "SOVisitFreq",
+                     "SODuration",
+                     "AISelect", "AISent", "AIAcc", "AIComplex", "AIAgents","AIAgentChange",
+                     "JobSat")
+numeric_columns <- c("WorkExp", "YearsCode", "ToolCountWork")
+
+tech_usage_column_prefixes <- c("LanguageHaveWorkedWith", "DatabaseHaveWorkedWith", "PlatformHaveWorkedWith",
+                                "WebframeHaveWorkedWith",  "DevEnvsHaveWorkedWith", "AIModelsHaveWorkedWith",
+                                "CommPlatformHaveWorkedWith", "OfficeStackAsyncHaveWorkedWith", "OpSysProfessional use")
+
+# selected logically columns
+selected_features <- c(nominal_columns, ordinal_columns, numeric_columns,tech_usage_column_prefixes,"ConvertedCompYearly")
+
+data_filtered <- data %>%
+  select(all_of(selected_features))
+
+cat("Rows:", nrow(data_filtered), ", Cols:", ncol(data_filtered), "\n")
+
+# A check that we don't miss anything
+data_filtered %>%
+  summarise(across(everything(), list(
+    class = ~ class(.x)[1],
+    missing = ~ sum(is.na(.x) | .x == ""),
+    n_unique = ~ n_distinct(.x, na.rm = TRUE),
+    n = ~ sum(!is.na(.x) & .x != ""),
+    variance = ~ var(.x, na.rm = TRUE)
+  ))) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("variable", ".value"),
+    names_pattern = "(.*)_(class|missing|n_unique|n|variance)"
+  ) %>%
+  View()
+
+# We see that our dataset have mostly character columns and only 5 numeric
+table(sapply(data_filtered, class))
+
+
+# Helper functions
 view_distinct <- function(x, variable) {
     x %>%
-        group_by(.data[[variable]]) %>%
+        group_by(.data_filtered[[variable]]) %>%
         summarise(count = n()) %>%
-        mutate(value = .data[[variable]]) %>%
+        mutate(value = .data_filtered[[variable]]) %>%
         select(!all_of(variable)) %>%
         distinct()
 }
+
 plot_distinct <- function(x) {
     x %>%
         mutate(
@@ -62,87 +158,31 @@ plot_distinct <- function(x) {
         theme_minimal() +
         theme(axis.text.x = element_text(angle = 45, hjust = 1))
 }
+
 view_stats <- function(x, variable) {
     x %>%
         summarise(
-            n = sum(!is.na(.data[[variable]])),
-            missing = sum(is.na(.data[[variable]])),
-            mean = mean(as.numeric(.data[[variable]]), na.rm = TRUE),
-            median = median(as.numeric(.data[[variable]]), na.rm = TRUE),
-            p25 = quantile(as.numeric(.data[[variable]]), 0.25, na.rm = TRUE),
-            p75 = quantile(as.numeric(.data[[variable]]), 0.75, na.rm = TRUE)
+            n = sum(!is.na(.data_filtered[[variable]])),
+            missing = sum(is.na(.data_filtered[[variable]])),
+            mean = mean(as.numeric(.data_filtered[[variable]]), na.rm = TRUE),
+            median = median(as.numeric(.data_filtered[[variable]]), na.rm = TRUE),
+            p25 = quantile(as.numeric(.data_filtered[[variable]]), 0.25, na.rm = TRUE),
+            p75 = quantile(as.numeric(.data_filtered[[variable]]), 0.75, na.rm = TRUE)
         ) %>%
         View()
 }
+
 view_explode_distinct <- function(x, variable) {
     x %>%
         select(all_of(variable)) %>%
-        filter(!is.na(.data[[variable]])) %>%
+        filter(!is.na(.data_filtered[[variable]])) %>%
         separate_longer_delim(all_of(variable), delim = regex(";\\s*")) %>%
-        group_by(.data[[variable]]) %>%
+        group_by(.data_filtered[[variable]]) %>%
         summarise(count = n()) %>%
-        arrange(.data[[variable]]) %>%
+        arrange(.data_filtered[[variable]]) %>%
         distinct() %>%
         View()
 }
-
-# COLUMNS OVERVIEW
-# ---
-
-# The dataset is quite messy, as it is a survey with a lot of open-ended
-# questions, multi-choice, rating, and matrix questions. A lot of them are
-# missing for various reasons. The variables can be grouped into rough groups
-# on how they can be handled. There are a few worth a special mention:
-# - drop_columns: open-ended questions, ResponseId and CompTotal. Reasoning for removing CompTotal is that we will use ConvertedCompYearly instead, which is directly calculated from CompTotal
-# - multifactor_columns: ordinal variables that need splitting into multiple features
-# - rate_column_prefixes: prefixes for rating questions
-# - multichoice_columns: multi-choice questions that need splitting into multiple features
-# - tech_usage_column_prefixes: prefixes for columns that indicate the usage of a certain technology. These require substantial cleaning, since they are most likely to contain a lot of noise
-# - double_multichoice_prefixes: multi-choice questions that will be converted as regular multi-choices, but each option will be an ordinal feature. See further sections for more info
-
-drop_columns <- c("ResponseId", "CompTotal", "AIExplain", "AIOpen",
-                  "AIAgentExtWrite", "AIAgentKnowWrite", "AIAgentOrchWrite",
-                  "AIAgentObsWrite")
-nominal_columns <- c("MainBranch", "EdLevel", "Employment",
-                     "DevType", "ICorPM", "RemoteWork", "TechEndorseIntro",
-                     "Industry", "Country", "Currency")
-ordinal_columns <- c("Age", "OrgSize", "AIThreat", "SOAccount", "SOVisitFreq",
-                     "SODuration", "SOPartFreq", "SOComm", "SOFriction",
-                     "AISelect", "AISent", "AIAcc", "AIComplex", "AIAgents",
-                     "JobSat", "AIAgentChange")
-numeric_columns <- c("WorkExp", "YearsCode", "ToolCountWork",
-                     "ToolCountPersonal")
-multifactor_columns <- c("LearnCodeChoose", "LearnCodeAI", "PurchaseInfluence",
-                         "NewRole", "LearnCodeChoose")
-rate_column_prefixes <- c("TechEndorse_", "JobSatPoints_", "TechOppose_",
-                          "SO_Actions_")
-multichoice_columns <- c("EmploymentAddl", "LearnCode", "AILearnHow",
-                         "SO_Dev_Content", "AIFrustration", "AIAgent_Uses",
-                         "AgentUsesGeneral", "AIAgentKnowledge",
-                         "AIAgentOrchestration", "AIAgentObserveSecure",
-                         "AIAgentExternal", "AIHuman")
-tech_usage_column_prefixes <- c("Language", "Database", "Platform", "Webframe", 
-                                "DevEnvs", "AIModels", "SOTags", "CommPlatform",
-                                "OfficeStackAsync", "DevEnv", "OpSys", "OfficeStack")
-# this can be handled the following way: take all distinct values from these
-# answers, convert them to columns and assign an ordinal rating, from 0
-# (don't plan to use AI) to 5 (currently mostly using AI)
-double_multichoice_prefixes <- c("AITool", "AIAgentImpact", "AIAgentChallenges")
-
-# A check that we don't miss anything and don't have bad column names
-data %>%
-    select(-starts_with(rate_column_prefixes),
-           -starts_with(tech_usage_column_prefixes),
-           -starts_with(double_multichoice_prefixes),
-           -all_of(c(
-               drop_columns,
-               nominal_columns,
-               ordinal_columns,
-               numeric_columns,
-               multifactor_columns,
-               multichoice_columns
-           ))) %>%
-    View()
 
 # Inspecting the ConvertedCompYearly variable, we can see that it contains a lot
 # of missing values, which don't mean a lot for our task. Let's drop these rows,
@@ -155,16 +195,64 @@ data <- data %>%
 # The data set contains a lot of categorical variables. Let's inspect them
 # using simple histograms and save them to disk for easy retrieval
 
-histogram <- function(x) {
-    ggplot(mapping = aes(x = x)) +
-        geom_bar() +
-        theme_minimal() +
-        theme(axis.text.x = element_text(angle = 90, hjust = 1))
+histogram <- function(x, name) {
+  p <- ggplot(mapping = aes(x = x))
+
+  if (is.numeric(x)) {
+    p <- p + geom_histogram(fill = "steelblue", bins = 50)
+  } else {
+    p <- p + geom_bar(fill = "grey40")
+  }
+
+  p + theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+     labs(title = paste("Distribution of", name), x = name)
 }
 
 hist_results <- data %>%
-    select(all_of(nominal_columns), all_of(ordinal_columns), ConvertedCompYearly) %>%
-    map(histogram)
+  select(all_of(nominal_columns), all_of(ordinal_columns)) %>%
+  imap(~histogram(.x, .y))
+walk(names(hist_results), function(v) {
+    p <- hist_results[[v]]
+    if (is.null(p)) return(NULL)
+    ggsave(
+        filename = file.path("output", "plots", paste0("hist_", v, ".png")),
+        plot = p,
+        width = 9,
+        height = 6,
+        dpi = 140
+    )
+})
+# These plots tell us the following: there are some missing values, there
+# are high-cardinal variables (Country) and a lot of those variables
+# are dominated by one or two values
+
+# Let's also map the categorical variables using violin plots in how they
+# compare to the ConvertedCompYearly
+
+violin <- function(x) {
+    ggplot(mapping = aes(x = x, y = data$ConvertedCompYearly, fill = x)) +
+        geom_violin() +
+        geom_jitter(color="black", size=0.2, alpha=0.6) +
+        theme_minimal() +
+        theme(axis.text.x = element_blank()) +
+        coord_transform(ylim = quantile(data$ConvertedCompYearly, .99, na.rm = TRUE) * c(0, 1))
+}
+
+violin_results <- data %>%
+    select(all_of(nominal_columns), all_of(ordinal_columns)) %>%
+    map(violin)
+
+walk(names(violin_results), function(v) {
+    p <- violin_results[[v]]
+    ggsave(
+        filename = file.path("output", "plots", paste0("violin_", v, ".png")),
+        plot = p,
+        width = 9,
+        height = 6,
+        dpi = 140
+    )
+})
 
 # Let's see the distributions of yearly compensations in relation to employment
 # status and country. We have to cut the outliers first, as there are quite a
@@ -195,83 +283,126 @@ data %>%
     facet_wrap(~Employment) +
     coord_transform(xlim = c(0, high_cutoff))
 
-walk(names(hist_results), function(v) {
-    p <- hist_results[[v]]
-    if (is.null(p)) return(NULL)
-    ggsave(
-        filename = file.path("output", "plots", paste0("hist_", v, ".png")),
-        plot = p,
-        width = 9,
-        height = 6,
-        dpi = 140
-    )
-})
+# Distribution of target variable
+summary(data_filtered$ConvertedCompYearly)
 
-# These plots tell us the following: there are a lot of missing values, there
-# are high-cardinal variables (Country, Currency) and a lot of those variables
-# are dominated by one or two values
+# There are outliers
+ggplot(data_filtered, aes(x = ConvertedCompYearly)) +
+  geom_histogram(fill = "steelblue", bins = 1000) +
+  coord_cartesian(xlim = c(0, 500000)) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Yearly Compensation",
+    subtitle = "Zoomed to $0 - $500k to handle outliers",
+    x = "Salary (USD)",
+    y = "Count"
+  )
 
-# Let's also map the categorical variables using violin plots in how they
-# compare to the ConvertedCompYearly
+lower_bound <- quantile(data_filtered$ConvertedCompYearly, 0.025, na.rm = TRUE)
+upper_bound <- quantile(data_filtered$ConvertedCompYearly, 0.975, na.rm = TRUE)
 
-violin <- function(x) {
-    ggplot(mapping = aes(x = x, y = data$ConvertedCompYearly, fill = x)) +
-        geom_violin() +
-        geom_jitter(color="black", size=0.2, alpha=0.6) +
-        theme_minimal() +
-        theme(axis.text.x = element_blank()) +
-        coord_transform(ylim = quantile(data$ConvertedCompYearly, .99, na.rm = TRUE) * c(0, 1))
-}
+data_cleaned <- data_filtered %>%
+  filter(ConvertedCompYearly >= lower_bound & ConvertedCompYearly <= upper_bound)
+summary(data_cleaned$ConvertedCompYearly)
 
-violin_results <- data %>%
-    select(all_of(nominal_columns), all_of(ordinal_columns)) %>%
-    map(violin)
+ggplot(data_cleaned, aes(x = ConvertedCompYearly)) +
+  geom_histogram(fill = "steelblue", bins = 15) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Yearly Compensation",
+    subtitle = "without outliers",
+    x = "Salary (USD)",
+    y = "Count"
+  )
 
-walk(names(violin_results), function(v) {
-    p <- violin_results[[v]]
-    ggsave(
-        filename = file.path("output", "plots", paste0("violin_", v, ".png")),
-        plot = p,
-        width = 9,
-        height = 6,
-        dpi = 140
-    )
-})
+#-- Clean outliers in numeric values
+# We see unusually large number of tools and years of code and workexp.
+summary(data_cleaned$WorkExp)
+summary(data_cleaned$YearsCode)
+summary(data_cleaned$ToolCountWork)
 
-# Let's find out categorical variables' mutual information with the outcome.
+upper_bound_w <- quantile(data_filtered$WorkExp, 0.99, na.rm = TRUE)
+upper_bound_w
+upper_bound_y <- quantile(data_filtered$YearsCode, 0.99, na.rm = TRUE)
+upper_bound_y
+upper_bound_t <- quantile(data_filtered$ToolCountWork, 0.98, na.rm = TRUE)
+upper_bound_t
+data_cleaned <- data_cleaned %>%
+  mutate(
+    WorkExp = if_else(WorkExp > upper_bound_w, upper_bound_w, WorkExp),
+    YearsCode = if_else(YearsCode > upper_bound_y, upper_bound_y, YearsCode),
+    ToolCountWork = if_else(ToolCountWork > upper_bound_t, upper_bound_t, ToolCountWork)
+  )
+# After
+summary(data_cleaned$WorkExp)
+summary(data_cleaned$YearsCode)
+summary(data_cleaned$ToolCountWork)
 
-data %>%
-    select(all_of(nominal_columns), all_of(ordinal_columns), ConvertedCompYearly) %>%
-    filter(!is.na(ConvertedCompYearly)) %>%
-    summarise(across(!ConvertedCompYearly,
-                     .fns = list(mi = ~ infotheo::mutinformation(
-                         infotheo::discretize(.x),
-                         infotheo::discretize(ConvertedCompYearly))))) %>%
-    pivot_longer(everything(), names_to = "variable", values_to = "mutual_information") %>%
-    View()
+
+ggplot(data_cleaned, aes(x = WorkExp)) +
+  geom_histogram(fill = "steelblue", bins = 15) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of WorkExp",
+    subtitle = "without outliers",
+    x = "WorkExp",
+    y = "Count"
+  )
+ggplot(data_cleaned, aes(x = YearsCode)) +
+  geom_histogram(fill = "steelblue", bins = 15) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of YearsCode",
+    subtitle = "without outliers",
+    x = "YearsCode",
+    y = "Count"
+  )
+ggplot(data_cleaned, aes(x = ToolCountWork)) +
+  geom_histogram(fill = "steelblue", bins = 15) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of ToolCountWork",
+    subtitle = "without outliers",
+    x = "ToolCountWork",
+    y = "Count"
+  )
+
+cat("Rows:", nrow(data_cleaned), ", Cols:", ncol(data_cleaned), "\n")
+
 
 # Let's start a recipe. We'll start by assigning roles to our variables, which
 # will help us to handle them later
 
 roles_recipe <- recipe(
-    data = data,
+    data = data_cleaned,
     formula = ConvertedCompYearly ~ .
 ) %>%
     add_role(all_of(nominal_columns), new_role = "nominal") %>%
     add_role(all_of(ordinal_columns), new_role = "ordinal") %>%
     add_role(all_of(numeric_columns), new_role = "numeric") %>%
-    add_role(all_of(multifactor_columns), new_role = "multifactor") %>%
-    add_role(starts_with(rate_column_prefixes), new_role = "rate") %>%
-    add_role(all_of(multichoice_columns), new_role = "multichoice") %>%
     add_role(starts_with(tech_usage_column_prefixes), new_role = "tech") %>%
-    add_role(starts_with(double_multichoice_prefixes), new_role = "double_multichoice") %>%
-    step_rm(all_of(drop_columns)) %>%
     prep()
 
+
+# Let's convert text and deal with missing values
+data_cleaned %>%
+  summarise(across(everything(), list(
+    class = ~ class(.x)[1],
+    missing = ~ sum(is.na(.x) | .x == ""),
+    n_unique = ~ n_distinct(.x, na.rm = TRUE),
+    n = ~ sum(!is.na(.x) & .x != ""),
+    variance = ~ var(.x, na.rm = TRUE)
+  ))) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("variable", ".value"),
+    names_pattern = "(.*)_(class|missing|n_unique|n|variance)"
+  ) %>%
+  View()
 # NOMINAL COLUMNS
 # ---
 
-# ResponseId, MainBranch and Age are the only variables without missing values.
+# MainBranch and Age are the only variables without missing values.
 # One-by-one, let's handle missing values. For some of them, NA means an empty
 # answer, not applicable, or "I prefer not to say". For some of them, we can
 # fill NA with the mode.
@@ -301,7 +432,7 @@ roles_recipe <- recipe(
 # Get all distinct values of a column, then print it into console in a format
 # to be inserted into fct_recode(). Helpful for quick option renaming
 
-data$ICorPM %>%
+data_cleaned$ICorPM %>%
     factor() %>%
     levels() %>%
     map_chr(~ paste0('"test" = "', .x, '",')) %>%
@@ -311,12 +442,10 @@ nominal_recipe <- roles_recipe %>%
     step_factor2string(has_role("nominal")) %>%
     step_impute_mode(ICorPM, RemoteWork) %>%
     step_mutate(
-        Employment = replace_na(Employment, "I prefer not to say"),
-        DevType = coalesce(na_if(DevType, "Other (please specify):"), "I prefer not to say"),
         EdLevel = replace_na(EdLevel, "Primary/elementary school")
     ) %>%
-    step_unknown(Industry, TechEndorseIntro, new_level = "None") %>%
-    step_unknown(Country, Currency, new_level = "Unknown") %>%
+    step_unknown(Industry, new_level = "None") %>%
+    step_unknown(Country, new_level = "Unknown") %>%
     step_mutate(
         MainBranch = fct_recode(MainBranch,
                                 "Developer" = "I am a developer by profession",
@@ -337,9 +466,7 @@ nominal_recipe <- roles_recipe %>%
                              "Dropout" = "Some college/university study without earning a degree",
         ),
         Employment = fct_recode(Employment,
-                                "Unknown" = "I prefer not to say",
                                 "Independent" = "Independent contractor, freelancer, or self-employed",
-                                "Unemployed" = "Not employed",
         ),
         DevType = fct_recode(DevType,
                              "Academic" = "Academic researcher",
@@ -367,9 +494,7 @@ nominal_recipe <- roles_recipe %>%
                              "Founder" = "Founder, technology or otherwise",
                              "ProductManager" = "Product manager",
                              "ProjectManager" = "Project manager",
-                             "Retired" = "Retired",
                              "Executive" = "Senior executive (C-suite, VP, etc.)",
-                             "Student" = "Student",
                              "Support" = "Support engineer or analyst",
                              "SysAdmin" = "System administrator",
                              "Designer" = "UX, Research Ops or UI design professional",
@@ -380,22 +505,12 @@ nominal_recipe <- roles_recipe %>%
                                 "InPerson" = "In-person",
                                 "Remote" = "Remote",
                                 "Flexible" = "Your choice (very flexible, you can come in when you want or just as needed)",
-        ),
-        TechEndorseIntro = fct_recode(TechEndorseIntro,
-                                      "Project" = "Personal Project",
-                                      "School" = "School",
-                                      "Work" = "Work",
-                                      "None" = "None"
-        ),
+        )
     ) %>%
     # convert ICorPM to IsPM (is People Manager)
     step_rename(IsPM = ICorPM) %>%
     step_mutate(IsPM = if_else(IsPM == "People manager", 1L, 0L)) %>%
-    step_mutate(
-        # get first 3 letters of the currency, since that code will indicate the currency uniquely
-        Currency = fct_relabel(Currency, function(x) if_else(x != "Unknown", substr(x, start = 1, stop = 3), x))
-    ) %>%
-    step_other(Country, Currency, threshold = 0.01, other = "Other") %>%
+    step_other(Country, threshold = 0.01, other = "Other") %>%
     prep()
 
 
@@ -417,9 +532,9 @@ ordinal_recipe <- nominal_recipe %>%
     step_mutate(
         OrgSize = OrgSize %>%
             factor(ordered = TRUE) %>%
+            fct_recode("None" = "I don’t know") %>%
             fct_na_value_to_level("None") %>%
             fct_relevel(c("None",
-                                    "I don’t know",
                                     "Just me - I am a freelancer, sole proprietor, etc.",
                                     "Less than 20 employees",
                                     "20 to 99 employees",
@@ -433,9 +548,9 @@ ordinal_recipe <- nominal_recipe %>%
     step_mutate(
         AIThreat = AIThreat %>%
             factor(ordered = TRUE) %>%
+            fct_recode("No" = "I'm not sure") %>%
             fct_na_value_to_level("No") %>%
             fct_relevel(c("No",
-                          "I'm not sure",
                           "Yes"))
     ) %>%
     step_mutate(
@@ -469,40 +584,6 @@ ordinal_recipe <- nominal_recipe %>%
                           "Between 5 and 10 years",
                           "Between 10 and 15 years",
                           "More than 15 years, or since Stack Overflow started in 2008"))
-    ) %>%
-    step_mutate(
-        SOPartFreq = SOPartFreq %>%
-            factor(ordered = TRUE) %>%
-            fct_na_value_to_level("I have never participated in Q&A on Stack Overflow") %>%
-            fct_relevel(c("I have never participated in Q&A on Stack Overflow",
-                          "Infrequently, less than once per year",
-                          "Less than once every 2 - 3 months",
-                          "Less than once per month or monthly",
-                          "A few times per month or weekly",
-                          "A few times per week",
-                          "Daily or almost daily",
-                          "Multiple times per day"))
-    ) %>%
-    step_mutate(
-        SOComm = SOComm %>%
-            factor(ordered = TRUE) %>%
-            fct_na_value_to_level("No, not at all") %>%
-            fct_relevel(c("No, not at all",
-                          "No, not really",
-                          "Not sure",
-                          "Neutral",
-                          "Yes, somewhat",
-                          "Yes, definitely"))
-    ) %>%
-    step_mutate(
-        SOFriction = SOFriction %>%
-            factor(ordered = TRUE) %>%
-            fct_na_value_to_level("No, not at all") %>%
-            fct_relevel(c("Rarely, almost never",
-                          "About half of the time",
-                          "I don't use AI or AI-enabled tools",
-                          "Less than half of the time",
-                          "More than half the time"))
     ) %>%
     step_mutate(
         AISelect = AISelect %>%
@@ -579,18 +660,7 @@ ordinal_recipe <- nominal_recipe %>%
 numeric_recipe <- ordinal_recipe %>%
     step_impute_median(has_role("numeric")) %>%
     prep()
-
-# FILTERING VARIABLES
-# ---
-
-# Let's conduct simple filtering for NAs first. We'll get rid of all variables
-# that have more than 50% of NAs in their 
-
-data %>%
-    summarise_all(~ sum(is.na(.))) %>%
-    View()
-
-data %>%
+data_cleaned %>%
     select(WorkExp, Age) %>%
     ggplot(mapping = aes(x = WorkExp, y = Age, fill = Age)) +
     geom_violin() +
@@ -617,11 +687,11 @@ data %>%
 # - Age, WorkExp and YearsCode are strongly correlated, we'll have to take one
 # - SO prefixed variables (StackOverflow) are all correlated. This is probably due to value imputation
 # - Same thing for AI related questions (except AIThreat)
+library(GGally)
 numeric_recipe %>%
     step_rm(-has_role("ordinal"), -has_role("numeric"), -has_role("outcome")) %>%
     step_ordinalscore(has_role("ordinal"), -JobSat) %>%
     step_integer(has_role("nominal")) %>%
-    step_naomit(has_role("outcome")) %>%
     prep() %>%
     bake(new_data = NULL) %>%
     ggcorr()
@@ -629,76 +699,11 @@ numeric_recipe %>%
 nominal_columns
 
 numeric_recipe %>%
-    step_rm(-Currency, -has_role("outcome")) %>%
+    step_rm(-has_role("outcome")) %>%
     step_naomit(has_role("outcome")) %>%
     step_dummy(has_role("nominal"), one_hot = TRUE) %>%
     prep() %>%
-    bake(new_data = NULL) %>%
-    ggcorr()
-
-mi_currency_country <- numeric_recipe %>%
-    step_naomit(has_role("outcome")) %>%
-    prep() %>%
-    bake(new_data = NULL) %>%
-    select(Country, Currency, ConvertedCompYearly)
-
-mi_result <- mi_currency_country %>%
-    # Joint probability p(x, y)
-    count(Country, Currency, name = "n_joint") %>%
-    mutate(p_joint = n_joint / sum(n_joint)) %>%
-    
-    # Marginal probability p(x)
-    group_by(Country) %>%
-    mutate(p_x = sum(p_joint)) %>%
-    
-    # Marginal probability p(y)
-    group_by(Currency) %>%
-    mutate(p_y = sum(p_joint)) %>%
-    ungroup() %>%
-    
-    # MI contribution per cell: p(x,y) * log(p(x,y) / p(x)*p(y))
-    mutate(mi_cell = p_joint * log2(p_joint / (p_x * p_y)))
-
-mutual_information <- sum(mi_result$mi_cell)
-cat("Mutual Information:", round(mutual_information, 4), "bits\n")
-
-mi_result %>%
-    mutate(
-        label = paste0(
-            "p=", round(p_joint, 3),
-            "\nmi=", round(mi_cell, 4)
-        )
-    ) %>%
-    ggplot(aes(x = Country, y = Currency)) +
-    
-    # Tile color = MI contribution (diverging: negative = suppression, positive = association)
-    geom_tile(aes(fill = mi_cell), color = "white", linewidth = 1.2) +
-    
-    # Annotate each cell
-    geom_text(aes(label = label), size = 3.5, color = "white", fontface = "bold") +
-    
-    scale_fill_gradient2(
-        low  = "#2166ac",   # negative MI (suppression)
-        mid  = "#f7f7f7",
-        high = "#b2182b",   # positive MI (strong association)
-        midpoint = 0,
-        name = "MI\ncontribution\n(bits)"
-    ) +
-    
-    labs(
-        title    = glue::glue("Mutual Information: {round(mutual_information, 4)} bits"),
-        subtitle = "Cell color = MI contribution  |  p = joint probability",
-        x = "Variable X",
-        y = "Variable Y",
-        caption  = "MI(X,Y) = Σ p(x,y) · log₂[ p(x,y) / (p(x)·p(y)) ]"
-    ) +
-    
-    theme_minimal(base_size = 13) +
-    theme(
-        plot.title    = element_text(face = "bold"),
-        panel.grid    = element_blank(),
-        legend.position = "right"
-    )
+    bake(new_data = NULL)
 
 # ENCODING ALL FEATURES
 # ---
@@ -712,6 +717,25 @@ final_recipe <- numeric_recipe %>%
     step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
     prep()
 
+final_data <- final_recipe %>%
+    bake(new_data = NULL)
+
+View(final_data)
+
+final_data %>%
+  summarise(across(everything(), list(
+    class = ~ class(.x)[1],
+    missing = ~ sum(is.na(.x) | .x == ""),
+    n_unique = ~ n_distinct(.x, na.rm = TRUE),
+    n = ~ sum(!is.na(.x) & .x != ""),
+    variance = ~ var(.x, na.rm = TRUE)
+  ))) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("variable", ".value"),
+    names_pattern = "(.*)_(class|missing|n_unique|n|variance)"
+  ) %>%
+  View()
 # Let's prepare our variables for fitting the linear regression model. We'll use
 # residual sum of squares, lm engine
 # Filtering ConvertedCompYearly outliers using IQR, removing all unclean
