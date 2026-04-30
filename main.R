@@ -784,3 +784,59 @@ rf_recipe <- final_recipe %>%
     step_dummy(has_role("nominal"), one_hot = TRUE) %>%
     step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
     step_ordinalscore(has_role("ordinal"), -c("JobSat"))
+
+
+
+
+
+
+#---- 5. SVM ----
+svm_recipe <- final_recipe %>%
+  step_naomit(has_role("outcome")) %>%
+  step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+  step_rm(Age, YearsCode) %>%
+  step_log(ConvertedCompYearly, base = 10) %>%
+  step_dummy(has_role("nominal"), one_hot = TRUE) %>%
+  step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
+  #step_nzv(all_predictors(), freq_cut = 99/1, unique_cut = 5)%>%
+  step_corr(all_numeric_predictors(), threshold = 0.7) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_pca(all_numeric_predictors(), threshold = 0.7)
+
+
+
+prepared_recipe <- svm_recipe %>% prep()
+
+# 2. Дивимось, які колонки залишилися в результаті
+colnames(bake(prepared_recipe, new_data = NULL))
+
+show_engines("svm_linear")
+library(LiblineaR)
+swm <- svm_linear(
+  cost = 10,               
+  margin = 0.01        
+) %>% 
+  set_engine("LiblineaR") %>% 
+  set_mode("regression")
+
+
+workflow() %>%
+  add_recipe(svm_recipe) %>%
+  add_model(swm) %>%
+  last_fit(data_split) -> swm_fit_result
+
+
+swm_fit_result %>% collect_metrics()
+swm_fit_result %>% collect_predictions()
+
+swm_fit_result %>% 
+  collect_predictions() %>% 
+  ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
+  geom_abline(lty = 2, color = "red") +
+  geom_point(alpha = 0.1) +
+  labs(title = "Actual vs Predicted ConvertedCompYearly SVM",
+       x = "Actual ",
+       y = "Predicted") +
+  theme_minimal()
+
+swm_fit_result %>% extract_workflow()
