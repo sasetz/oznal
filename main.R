@@ -133,9 +133,9 @@ table(sapply(data_filtered, class))
 # Helper functions
 view_distinct <- function(x, variable) {
     x %>%
-        group_by(.data_filtered[[variable]]) %>%
+        group_by(.data[[variable]]) %>%
         summarise(count = n()) %>%
-        mutate(value = .data_filtered[[variable]]) %>%
+        mutate(value = .data[[variable]]) %>%
         select(!all_of(variable)) %>%
         distinct()
 }
@@ -254,36 +254,7 @@ walk(names(violin_results), function(v) {
     )
 })
 
-# Let's see the distributions of yearly compensations in relation to employment
-# status and country. We have to cut the outliers first, as there are quite a
-# few of them, and group the countries into a factor of 20, so that they don't
-# blow out the plot. These distributions tell us that the ConvertedCompYearly
-# is heavily dependent on the country, and they are just different distributions
-# altogether. This will be very important for modeling later
-library(ggridges)
-high_cutoff <- quantile(
-    data$ConvertedCompYearly,
-    probs=c(.25, .75)
-    )[2] + 1.5 * IQR(data$ConvertedCompYearly)
-data %>%
-    #filter(Employment == "Employed" | Employment == "Independent contractor, freelancer, or self-employed") %>%
-    mutate(
-        Country = fct_lump_n(Country, n = 20) %>%
-            fct_recode(
-                "USA" = "United States of America",
-                "UK"  = "United Kingdom of Great Britain and Northern Ireland"
-            )
-           ) %>%
-    select(ConvertedCompYearly, Employment, Country) %>%
-    filter(ConvertedCompYearly <= high_cutoff) %>%
-    ggplot(mapping = aes(x = ConvertedCompYearly, y = Country, fill = Country)) +
-    geom_density_ridges() +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
-    facet_wrap(~Employment) +
-    coord_transform(xlim = c(0, high_cutoff))
-
-# Distribution of target variable
+# Distribution of the target variable
 summary(data_filtered$ConvertedCompYearly)
 
 # There are outliers
@@ -314,6 +285,30 @@ ggplot(data_cleaned, aes(x = ConvertedCompYearly)) +
     x = "Salary (USD)",
     y = "Count"
   )
+
+# Let's see the distributions of yearly compensations in relation to employment
+# status and country. We have to cut the outliers first, as there are quite a
+# few of them, and group the countries into a factor of 20, so that they don't
+# blow out the plot. These distributions tell us that the ConvertedCompYearly
+# is heavily dependent on the country, and they are just different distributions
+# altogether. This will be very important for modeling later
+library(ggridges)
+data_cleaned %>%
+    mutate(
+        Country = fct_lump_n(Country, n = 20) %>%
+            fct_recode(
+                "USA" = "United States of America",
+                "UK"  = "United Kingdom of Great Britain and Northern Ireland"
+            )
+           ) %>%
+    select(ConvertedCompYearly, Employment, Country) %>%
+    filter(ConvertedCompYearly <= high_cutoff) %>%
+    ggplot(mapping = aes(x = ConvertedCompYearly, y = Country, fill = Country)) +
+    geom_density_ridges() +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    facet_wrap(~Employment) +
+    coord_transform(xlim = c(0, high_cutoff))
 
 #-- Clean outliers in numeric values
 # We see unusually large number of tools and years of code and workexp.
@@ -380,8 +375,7 @@ roles_recipe <- recipe(
     add_role(all_of(nominal_columns), new_role = "nominal") %>%
     add_role(all_of(ordinal_columns), new_role = "ordinal") %>%
     add_role(all_of(numeric_columns), new_role = "numeric") %>%
-    add_role(starts_with(tech_usage_column_prefixes), new_role = "tech") %>%
-    prep()
+    add_role(starts_with(tech_usage_column_prefixes), new_role = "tech")
 
 
 # Let's convert text and deal with missing values
@@ -510,44 +504,58 @@ nominal_recipe <- roles_recipe %>%
     # convert ICorPM to IsPM (is People Manager)
     step_rename(IsPM = ICorPM) %>%
     step_mutate(IsPM = if_else(IsPM == "People manager", 1L, 0L)) %>%
-    step_other(Country, threshold = 0.01, other = "Other") %>%
-    prep()
+    step_novel(Country, new_level = "Qatar") %>%
+#    step_mutate(
+#        Country = Country %>%
+#            as.character() %>%
+#            factor(levels = c(
+#                "Afghanistan", "Albania", "Algeria", "Andorra", "Angola", "Argentina", "Armenia", "Australia", "Austria", "Azerbaijan", "Bahrain", "Bangladesh", "Barbados", "Belarus", "Belgium", "Belize", "Benin", "Bhutan", "Bolivia", "Bosnia and Herzegovina", "Botswana", "Brazil", "Bulgaria", "Burundi", "Cambodia", "Cameroon", "Canada", "Chile", "China", "Colombia", "Congo, Republic of the...", "Costa Rica", "Côte d'Ivoire", "Croatia", "Cuba", "Cyprus", "Czech Republic", "Democratic Republic of the Congo", "Denmark", "Dominican Republic", "Ecuador", "Egypt", "El Salvador", "Estonia", "Ethiopia", "Finland", "France", "Georgia", "Germany", "Ghana", "Greece", "Guatemala", "Guinea", "Guyana", "Haiti", "Honduras", "Hong Kong (S.A.R.)", "Hungary", "Iceland", "India", "Indonesia", "Iran, Islamic Republic of...", "Iraq", "Ireland", "Isle of Man", "Israel", "Italy", "Jamaica", "Japan", "Jordan", "Kazakhstan", "Kenya", "Kosovo", "Kuwait", "Kyrgyzstan", "Latvia", "Lebanon", "Lesotho", "Libyan Arab Jamahiriya", "Lithuania", "Luxembourg", "Madagascar", "Malawi", "Malaysia", "Maldives", "Mali", "Malta", "Mauritania", "Mauritius", "Mexico", "Moldova", "Mongolia", "Montenegro", "Morocco", "Mozambique", "Myanmar", "Namibia", "Nepal", "Netherlands", "New Zealand", "Nicaragua", "Nigeria", "Nomadic", "North Korea", "Norway", "Oman", "Pakistan", "Panama", "Papua New Guinea", "Paraguay", "Peru", "Philippines", "Poland", "Portugal", "Qatar", "Republic of Korea", "Republic of Moldova", "Republic of North Macedonia", "Romania", "Russian Federation", "Rwanda", "Saint Lucia", "Saudi Arabia", "Senegal", "Serbia", "Singapore", "Slovakia", "Slovenia", "Somalia", "South Africa", "South Korea", "Spain", "Sri Lanka", "Sudan", "Suriname", "Swaziland", "Sweden", "Switzerland", "Syrian Arab Republic", "Taiwan", "Thailand", "Trinidad and Tobago", "Tunisia", "Turkey", "Turkmenistan", "Uganda", "Ukraine", "United Arab Emirates", "United Kingdom of Great Britain and Northern Ireland", "United Republic of Tanzania", "United States of America", "Uruguay", "Uzbekistan", "Venezuela, Bolivarian Republic of...", "Viet Nam", "Yemen", "Zambia", "Zimbabwe"
+#            ))
+#    ) %>%
+    step_other(Country, threshold = 0.01, other = "Other")
 
+levels(factor(data_cleaned$Country)) %>%
+    map(function(x){
+        cat('"', x, '",\n', sep = "")
+    })
 
 # ORDINAL COLUMNS
 # ---
 
 ordinal_recipe <- nominal_recipe %>%
     step_mutate(
-        Age = factor(Age, ordered = TRUE),
-        Age = Age %>% fct_relevel(c("Prefer not to say",
-                            "18-24 years old",
-                            "25-34 years old",
-                            "35-44 years old",
-                            "45-54 years old",
-                            "55-64 years old",
-                            "65 years or older"))
+        Age = Age %>%
+            factor(levels = c("Prefer not to say",
+                                "18-24 years old",
+                                "25-34 years old",
+                                "35-44 years old",
+                                "45-54 years old",
+                                "55-64 years old",
+                                "65 years or older"),
+                     ordered = TRUE)
     ) %>%
-    step_unknown(OrgSize, new_level = "None") %>%
     step_mutate(
         OrgSize = OrgSize %>%
-            factor(ordered = TRUE) %>%
-            fct_recode("None" = "I don’t know") %>%
-            fct_na_value_to_level("None") %>%
-            fct_relevel(c("None",
-                                    "Just me - I am a freelancer, sole proprietor, etc.",
-                                    "Less than 20 employees",
-                                    "20 to 99 employees",
-                                    "100 to 499 employees",
-                                    "500 to 999 employees",
-                                    "1,000 to 4,999 employees",
-                                    "5,000 to 9,999 employees",
-                                    "10,000 or more employees")
-                                  )
+            factor(levels = c(
+                "None",
+                "Just me - I am a freelancer, sole proprietor, etc.",
+                "Less than 20 employees",
+                "20 to 99 employees",
+                "100 to 499 employees",
+                "500 to 999 employees",
+                "1,000 to 4,999 employees",
+                "5,000 to 9,999 employees",
+                "10,000 or more employees",
+                "I don't know"),
+                ordered = TRUE) %>%
+            fct_recode("None" = "I don't know") %>%
+            fct_na_value_to_level("None")
     ) %>%
     step_mutate(
         AIThreat = AIThreat %>%
-            factor(ordered = TRUE) %>%
+            factor(ordered = TRUE,
+                   levels = c("No", "I'm not sure", "Yes")
+                   ) %>%
             fct_recode("No" = "I'm not sure") %>%
             fct_na_value_to_level("No") %>%
             fct_relevel(c("No",
@@ -555,101 +563,93 @@ ordinal_recipe <- nominal_recipe %>%
     ) %>%
     step_mutate(
         SOAccount = SOAccount %>%
-            factor(ordered = TRUE) %>%
-            fct_na_value_to_level("Not sure/can't remember") %>%
-            fct_relevel(c("No",
+            factor(levels = c("No",
                           "Not sure/can't remember",
-                          "Yes"))
+                          "Yes"),
+                   ordered = TRUE) %>%
+            fct_na_value_to_level("Not sure/can't remember")
     ) %>%
     step_mutate(
         SOVisitFreq = SOVisitFreq %>%
-            factor(ordered = TRUE) %>%
-            fct_na_value_to_level("Infrequently, less than once per year") %>%
-            fct_relevel(c("Infrequently, less than once per year",
+            factor(ordered = TRUE,
+                   levels = c("Infrequently, less than once per year",
                           "Less than once every 2 - 3 months",
                           "Less than once per month or monthly",
                           "A few times per month or weekly",
                           "A few times per week",
                           "Daily or almost daily",
-                          "Multiple times per day"))
+                          "Multiple times per day")) %>%
+            fct_na_value_to_level("Infrequently, less than once per year")
     ) %>%
     step_mutate(
         SODuration = SODuration %>%
-            factor(ordered = TRUE) %>%
-            fct_na_value_to_level("I don't use Stack Overflow") %>%
-            fct_relevel(c("I don't use Stack Overflow",
+            factor(ordered = TRUE, levels = c("I don't use Stack Overflow",
                           "Less than one year",
                           "Between 1 and 3 years",
                           "Between 3 and 5 years",
                           "Between 5 and 10 years",
                           "Between 10 and 15 years",
-                          "More than 15 years, or since Stack Overflow started in 2008"))
+                          "More than 15 years, or since Stack Overflow started in 2008")) %>%
+            fct_na_value_to_level("I don't use Stack Overflow")
     ) %>%
     step_mutate(
         AISelect = AISelect %>%
-            factor(ordered = TRUE) %>%
-            fct_na_value_to_level("Yes, I use AI tools monthly or infrequently") %>%
-            fct_relevel(c("No, and I don't plan to",
+            factor(ordered = TRUE, levels = c("No, and I don't plan to",
                           "No, but I plan to soon",
                           "Yes, I use AI tools monthly or infrequently",
                           "Yes, I use AI tools weekly",
-                          "Yes, I use AI tools daily"))
+                          "Yes, I use AI tools daily")) %>%
+            fct_na_value_to_level("Yes, I use AI tools monthly or infrequently")
     ) %>%
     step_mutate(
         AISent = AISent %>%
-            factor(ordered = TRUE) %>%
-            fct_na_value_to_level("Indifferent") %>%
-            fct_relevel(c("Very unfavorable",
+            factor(ordered = TRUE, levels = c("Very unfavorable",
                           "Unfavorable",
                           "Unsure",
                           "Indifferent",
                           "Favorable",
-                          "Very favorable"))
+                          "Very favorable")) %>%
+            fct_na_value_to_level("Indifferent")
     ) %>%
     step_mutate(
         AIAcc = AIAcc %>%
-            factor(ordered = TRUE) %>%
-            fct_na_value_to_level("Neither trust nor distrust") %>%
-            fct_relevel(c("Highly distrust",
+            factor(ordered = TRUE, levels = c("Highly distrust",
                           "Highly trust",
                           "Neither trust nor distrust",
                           "Somewhat distrust",
-                          "Somewhat trust"))
+                          "Somewhat trust")) %>%
+            fct_na_value_to_level("Neither trust nor distrust")
     ) %>%
     step_mutate(
         AIComplex = AIComplex %>%
-            factor(ordered = TRUE) %>%
-            fct_na_value_to_level("I don't use AI tools for complex tasks / I don't know") %>%
-            fct_relevel(c("Very poor at handling complex tasks",
+            factor(ordered = TRUE, levels = c("Very poor at handling complex tasks",
                           "Bad at handling complex tasks",
                           "I don't use AI tools for complex tasks / I don't know",
                           "Neither good or bad at handling complex tasks",
                           "Good, but not great at handling complex tasks",
-                          "Very well at handling complex tasks"))
+                          "Very well at handling complex tasks")) %>%
+            fct_na_value_to_level("I don't use AI tools for complex tasks / I don't know")
     ) %>%
     step_mutate(
         AIAgents = AIAgents %>%
-            factor(ordered = TRUE) %>%
-            fct_na_value_to_level("No, and I don't plan to") %>%
-            fct_relevel(c("No, and I don't plan to",
+            factor(ordered = TRUE, levels = c("No, and I don't plan to",
                           "No, but I plan to",
                           "No, I use AI exclusively in copilot/autocomplete mode",
                           "Yes, I use AI agents at work daily",
                           "Yes, I use AI agents at work monthly or infrequently",
-                          "Yes, I use AI agents at work weekly"))
+                          "Yes, I use AI agents at work weekly")) %>%
+            fct_na_value_to_level("No, and I don't plan to")
     ) %>%
     step_mutate(
         AIAgentChange = AIAgentChange %>%
-            factor(ordered = TRUE) %>%
-            fct_na_value_to_level("Not at all or minimally") %>%
-            fct_relevel(c("Not at all or minimally",
+            factor(ordered = TRUE, levels = c("Not at all or minimally",
                           "No, but my development work has changed somewhat due to non-AI factors",
                           "No, but my development work has significantly changed due to non-AI factors",
                           "Yes, somewhat",
-                          "Yes, to a great extent"))
+                          "Yes, to a great extent")) %>%
+            fct_na_value_to_level("Not at all or minimally")
     ) %>%
-    step_impute_median(JobSat) %>%
-    prep()
+    step_impute_median(JobSat)
 
 # NUMERIC COLUMNS
 # ---
@@ -658,24 +658,22 @@ ordinal_recipe <- nominal_recipe %>%
 # them later
 
 numeric_recipe <- ordinal_recipe %>%
-    step_impute_median(has_role("numeric")) %>%
-    prep()
-data_cleaned %>%
-    select(WorkExp, Age) %>%
-    ggplot(mapping = aes(x = WorkExp, y = Age, fill = Age)) +
-    geom_violin() +
-    theme_minimal()
+    step_impute_median(has_role("numeric"))
 
-# MULTIFACTOR COLUMNS
+
+# FINAL RECIPE
 # ---
 
-# These columns contain answers to questions that can be interpreted as multiple
-# features. Let's determine the relevant ones and split them
+# Let's remove all unused variables from the final recipe. They are potentially
+# meaningful, but since we have enough variables already (>20 before encoding),
+# we won't waste a lot of time trying to extract every single information point
+# from likely marginally unrelated variables
+# Encoding will be done on per-model basis, as different models will also
+# require different preprocessing steps
 
-data %>%
-    select(ConvertedCompYearly) %>%
-    summarise(across(everything(), ~ sum(!is.na(.)))) %>%
-    View()
+final_recipe <- numeric_recipe %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome"))
+
 
 #---- 3. Linear regression ----
 
@@ -685,73 +683,38 @@ data %>%
 
 # The following correlation matrix eliminates a few variables:
 # - Age, WorkExp and YearsCode are strongly correlated, we'll have to take one
-# - SO prefixed variables (StackOverflow) are all correlated. This is probably due to value imputation
+# - SO prefixed variables (StackOverflow) are all correlated. This is probably due to value imputation, let's leave just SOVisitFreq
 # - Same thing for AI related questions (except AIThreat)
-library(GGally)
-numeric_recipe %>%
-    step_rm(-has_role("ordinal"), -has_role("numeric"), -has_role("outcome")) %>%
+# - Some encoded nominal variables are correlating, we'll remove the ones have high correlations
+final_recipe %>%
+    step_rm(has_role("nominal")) %>%
     step_ordinalscore(has_role("ordinal"), -JobSat) %>%
-    step_integer(has_role("nominal")) %>%
     prep() %>%
     bake(new_data = NULL) %>%
     ggcorr()
 
-nominal_columns
-
-numeric_recipe %>%
-    step_rm(-has_role("outcome")) %>%
-    step_naomit(has_role("outcome")) %>%
+final_recipe %>%
+    step_rm(-all_outcomes(), -has_role("nominal")) %>%
     step_dummy(has_role("nominal"), one_hot = TRUE) %>%
     prep() %>%
-    bake(new_data = NULL)
+    bake(new_data = NULL) %>%
+    ggcorr(hjust = 1, size = 2)
 
-# ENCODING ALL FEATURES
-# ---
-# Apply one-hot encoding to all prepared nominal variables
-
-
-final_recipe <- numeric_recipe %>%
-    step_naomit(has_role("outcome")) %>%
-    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
-    step_dummy(has_role("nominal"), one_hot = TRUE) %>%
-    step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
-    prep()
-
-final_data <- final_recipe %>%
-    bake(new_data = NULL)
-
-View(final_data)
-
-final_data %>%
-  summarise(across(everything(), list(
-    class = ~ class(.x)[1],
-    missing = ~ sum(is.na(.x) | .x == ""),
-    n_unique = ~ n_distinct(.x, na.rm = TRUE),
-    n = ~ sum(!is.na(.x) & .x != ""),
-    variance = ~ var(.x, na.rm = TRUE)
-  ))) %>%
-  pivot_longer(
-    everything(),
-    names_to = c("variable", ".value"),
-    names_pattern = "(.*)_(class|missing|n_unique|n|variance)"
-  ) %>%
-  View()
 # Let's prepare our variables for fitting the linear regression model. We'll use
 # residual sum of squares, lm engine
-# Filtering ConvertedCompYearly outliers using IQR, removing all unclean
-# variables, encoding categorical variables.
+# Removing previously mentioned variables to avoid multicollinearity
 
-lr_recipe <- numeric_recipe %>%
+lr_recipe <- final_recipe %>%
     step_naomit(has_role("outcome")) %>%
-    step_filter(ConvertedCompYearly <= high_cutoff) %>%
     step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
     step_rm(Country, Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
     step_dummy(has_role("nominal"), one_hot = TRUE) %>%
+    step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
     step_ordinalscore(has_role("ordinal"), -c("JobSat"))
 
 # Splitting data. Using a simple proportion of 80/20
 set.seed(142)
-data_split <- initial_split(data, prop = .8)
+data_split <- initial_split(data_cleaned, prop = .8)
 train_data <- training(data_split)
 test_data <- testing(data_split)
 
@@ -763,10 +726,13 @@ workflow() %>%
     add_model(lm_spec) %>%
     last_fit(data_split) -> lm_fit_result
 
+lr_recipe %>%
+    prep() %>%
+    bake(new_data = test_data) %>%
+    summarise_all(~ sum(is.na(.))) %>%
+    View()
+
 lm_fit_result %>% collect_metrics()
 lm_fit_result %>% collect_predictions()
 lm_fit_result %>% extract_workflow()
 
-View(tidy(lm_fit))
-View(lm_fit) # same as summary(lm_fit)
-lm_fit
