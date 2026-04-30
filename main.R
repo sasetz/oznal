@@ -184,14 +184,6 @@ view_explode_distinct <- function(x, variable) {
         View()
 }
 
-# Inspecting the ConvertedCompYearly variable, we can see that it contains a lot
-# of missing values, which don't mean a lot for our task. Let's drop these rows,
-# so we end up with a much smaller dataset length (about 50% of original 49k)
-
-data <- data %>%
-    drop_na(ConvertedCompYearly) %>%
-    filter(ConvertedCompYearly > 0)
-
 # The data set contains a lot of categorical variables. Let's inspect them
 # using simple histograms and save them to disk for easy retrieval
 
@@ -514,20 +506,7 @@ nominal_recipe <- roles_recipe %>%
             ),
             levels = c(country_list, "Other")
         )
-    ) %>%
-    step_unknown(Country, new_level = "Unknown")
-#    step_mutate(
-#        Country = Country %>%
-#            as.character() %>%
-#            factor(levels = c(
-#                "Afghanistan", "Albania", "Algeria", "Andorra", "Angola", "Argentina", "Armenia", "Australia", "Austria", "Azerbaijan", "Bahrain", "Bangladesh", "Barbados", "Belarus", "Belgium", "Belize", "Benin", "Bhutan", "Bolivia", "Bosnia and Herzegovina", "Botswana", "Brazil", "Bulgaria", "Burundi", "Cambodia", "Cameroon", "Canada", "Chile", "China", "Colombia", "Congo, Republic of the...", "Costa Rica", "Côte d'Ivoire", "Croatia", "Cuba", "Cyprus", "Czech Republic", "Democratic Republic of the Congo", "Denmark", "Dominican Republic", "Ecuador", "Egypt", "El Salvador", "Estonia", "Ethiopia", "Finland", "France", "Georgia", "Germany", "Ghana", "Greece", "Guatemala", "Guinea", "Guyana", "Haiti", "Honduras", "Hong Kong (S.A.R.)", "Hungary", "Iceland", "India", "Indonesia", "Iran, Islamic Republic of...", "Iraq", "Ireland", "Isle of Man", "Israel", "Italy", "Jamaica", "Japan", "Jordan", "Kazakhstan", "Kenya", "Kosovo", "Kuwait", "Kyrgyzstan", "Latvia", "Lebanon", "Lesotho", "Libyan Arab Jamahiriya", "Lithuania", "Luxembourg", "Madagascar", "Malawi", "Malaysia", "Maldives", "Mali", "Malta", "Mauritania", "Mauritius", "Mexico", "Moldova", "Mongolia", "Montenegro", "Morocco", "Mozambique", "Myanmar", "Namibia", "Nepal", "Netherlands", "New Zealand", "Nicaragua", "Nigeria", "Nomadic", "North Korea", "Norway", "Oman", "Pakistan", "Panama", "Papua New Guinea", "Paraguay", "Peru", "Philippines", "Poland", "Portugal", "Qatar", "Republic of Korea", "Republic of Moldova", "Republic of North Macedonia", "Romania", "Russian Federation", "Rwanda", "Saint Lucia", "Saudi Arabia", "Senegal", "Serbia", "Singapore", "Slovakia", "Slovenia", "Somalia", "South Africa", "South Korea", "Spain", "Sri Lanka", "Sudan", "Suriname", "Swaziland", "Sweden", "Switzerland", "Syrian Arab Republic", "Taiwan", "Thailand", "Trinidad and Tobago", "Tunisia", "Turkey", "Turkmenistan", "Uganda", "Ukraine", "United Arab Emirates", "United Kingdom of Great Britain and Northern Ireland", "United Republic of Tanzania", "United States of America", "Uruguay", "Uzbekistan", "Venezuela, Bolivarian Republic of...", "Viet Nam", "Yemen", "Zambia", "Zimbabwe"
-#            ))
-#    ) %>%
-
-levels(factor(data_cleaned$Country)) %>%
-    map(function(x){
-        cat('"', x, '",\n', sep = "")
-    })
+    )
 
 # ORDINAL COLUMNS
 # ---
@@ -717,7 +696,7 @@ final_recipe %>%
 lr_recipe <- final_recipe %>%
     step_naomit(has_role("outcome")) %>%
     step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
-    step_rm(Country, Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
+    step_rm(Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
     step_dummy(has_role("nominal"), one_hot = TRUE) %>%
     step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
     step_ordinalscore(has_role("ordinal"), -c("JobSat"))
@@ -736,7 +715,6 @@ country_list <- levels((train_data %>%
             mutate(
                 Country = Country %>% fct_lump_prop(prop = 0.01, other_level = "Other")
             ))[["Country"]])
-
 paste(country_list, sep = "\n")
 cat(paste0('"', country_list, '"', collapse = ", "))
 
@@ -758,3 +736,16 @@ lm_fit_result %>% collect_metrics()
 lm_fit_result %>% collect_predictions()
 lm_fit_result %>% extract_workflow()
 
+
+#---- 4. Random forest ----
+
+# The next model we've chosen is random forest. We have a lot of rows to train
+# on, so there isn't much sense in using a single decision tree
+
+rf_recipe <- final_recipe %>%
+    step_naomit(has_role("outcome")) %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+    step_rm(Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
+    step_dummy(has_role("nominal"), one_hot = TRUE) %>%
+    step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat"))
