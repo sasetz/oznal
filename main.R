@@ -432,6 +432,8 @@ data_cleaned$ICorPM %>%
     map_chr(~ paste0('"test" = "', .x, '",')) %>%
     writeLines()
 
+country_list <- c("Australia", "Austria", "Brazil", "Canada", "Czech Republic", "France", "Germany", "India", "Italy", "Netherlands", "Poland", "Portugal", "Spain", "Sweden", "Switzerland", "Ukraine", "United Kingdom of Great Britain and Northern Ireland", "United States of America")
+
 nominal_recipe <- roles_recipe %>%
     step_factor2string(has_role("nominal")) %>%
     step_impute_mode(ICorPM, RemoteWork) %>%
@@ -439,7 +441,6 @@ nominal_recipe <- roles_recipe %>%
         EdLevel = replace_na(EdLevel, "Primary/elementary school")
     ) %>%
     step_unknown(Industry, new_level = "None") %>%
-    step_unknown(Country, new_level = "Unknown") %>%
     step_mutate(
         MainBranch = fct_recode(MainBranch,
                                 "Developer" = "I am a developer by profession",
@@ -504,7 +505,17 @@ nominal_recipe <- roles_recipe %>%
     # convert ICorPM to IsPM (is People Manager)
     step_rename(IsPM = ICorPM) %>%
     step_mutate(IsPM = if_else(IsPM == "People manager", 1L, 0L)) %>%
-    step_novel(Country, new_level = "Qatar") %>%
+    step_mutate(
+        Country = factor(
+            if_else(
+                as.character(Country) %in% country_list,
+                Country,
+                "Other"
+            ),
+            levels = c(country_list, "Other")
+        )
+    ) %>%
+    step_unknown(Country, new_level = "Unknown")
 #    step_mutate(
 #        Country = Country %>%
 #            as.character() %>%
@@ -512,7 +523,6 @@ nominal_recipe <- roles_recipe %>%
 #                "Afghanistan", "Albania", "Algeria", "Andorra", "Angola", "Argentina", "Armenia", "Australia", "Austria", "Azerbaijan", "Bahrain", "Bangladesh", "Barbados", "Belarus", "Belgium", "Belize", "Benin", "Bhutan", "Bolivia", "Bosnia and Herzegovina", "Botswana", "Brazil", "Bulgaria", "Burundi", "Cambodia", "Cameroon", "Canada", "Chile", "China", "Colombia", "Congo, Republic of the...", "Costa Rica", "Côte d'Ivoire", "Croatia", "Cuba", "Cyprus", "Czech Republic", "Democratic Republic of the Congo", "Denmark", "Dominican Republic", "Ecuador", "Egypt", "El Salvador", "Estonia", "Ethiopia", "Finland", "France", "Georgia", "Germany", "Ghana", "Greece", "Guatemala", "Guinea", "Guyana", "Haiti", "Honduras", "Hong Kong (S.A.R.)", "Hungary", "Iceland", "India", "Indonesia", "Iran, Islamic Republic of...", "Iraq", "Ireland", "Isle of Man", "Israel", "Italy", "Jamaica", "Japan", "Jordan", "Kazakhstan", "Kenya", "Kosovo", "Kuwait", "Kyrgyzstan", "Latvia", "Lebanon", "Lesotho", "Libyan Arab Jamahiriya", "Lithuania", "Luxembourg", "Madagascar", "Malawi", "Malaysia", "Maldives", "Mali", "Malta", "Mauritania", "Mauritius", "Mexico", "Moldova", "Mongolia", "Montenegro", "Morocco", "Mozambique", "Myanmar", "Namibia", "Nepal", "Netherlands", "New Zealand", "Nicaragua", "Nigeria", "Nomadic", "North Korea", "Norway", "Oman", "Pakistan", "Panama", "Papua New Guinea", "Paraguay", "Peru", "Philippines", "Poland", "Portugal", "Qatar", "Republic of Korea", "Republic of Moldova", "Republic of North Macedonia", "Romania", "Russian Federation", "Rwanda", "Saint Lucia", "Saudi Arabia", "Senegal", "Serbia", "Singapore", "Slovakia", "Slovenia", "Somalia", "South Africa", "South Korea", "Spain", "Sri Lanka", "Sudan", "Suriname", "Swaziland", "Sweden", "Switzerland", "Syrian Arab Republic", "Taiwan", "Thailand", "Trinidad and Tobago", "Tunisia", "Turkey", "Turkmenistan", "Uganda", "Ukraine", "United Arab Emirates", "United Kingdom of Great Britain and Northern Ireland", "United Republic of Tanzania", "United States of America", "Uruguay", "Uzbekistan", "Venezuela, Bolivarian Republic of...", "Viet Nam", "Yemen", "Zambia", "Zimbabwe"
 #            ))
 #    ) %>%
-    step_other(Country, threshold = 0.01, other = "Other")
 
 levels(factor(data_cleaned$Country)) %>%
     map(function(x){
@@ -717,6 +727,18 @@ set.seed(142)
 data_split <- initial_split(data_cleaned, prop = .8)
 train_data <- training(data_split)
 test_data <- testing(data_split)
+
+# Since Country variable contains a lot of options, it's simpler to hardcode the
+# countries to the most frequent ones. If a country has less than 1% of rows, we
+# lump it under the "Other" category
+country_list <- levels((train_data %>%
+            select(Country) %>%
+            mutate(
+                Country = Country %>% fct_lump_prop(prop = 0.01, other_level = "Other")
+            ))[["Country"]])
+
+paste(country_list, sep = "\n")
+cat(paste0('"', country_list, '"', collapse = ", "))
 
 show_engines("linear_reg")
 lm_spec <- linear_reg() %>% set_engine("lm")
