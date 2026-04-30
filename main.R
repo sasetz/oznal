@@ -8,10 +8,10 @@ set.seed(124)
 #---- 1. Load data ----
 
 # setwd("~/studium/8 semester/oznal/project")
-# schema <- read_csv("data/survey_results_schema.csv", show_col_types = FALSE)
-# data <- read_csv("data/survey_results_public.csv", show_col_types = FALSE)
-schema <- read_csv("survey_results_schema.csv", show_col_types = FALSE)
-data <- read_csv("survey_results_public.csv", show_col_types = FALSE)
+schema <- read_csv("data/survey_results_schema.csv", show_col_types = FALSE)
+ data <- read_csv("data/survey_results_public.csv", show_col_types = FALSE)
+# schema <- read_csv("survey_results_schema.csv", show_col_types = FALSE)
+#data <- read_csv("survey_results_public.csv", show_col_types = FALSE)
 
 dir.create("output", showWarnings = FALSE)
 dir.create(file.path("output", "plots"), recursive = TRUE, showWarnings = FALSE)
@@ -710,13 +710,13 @@ test_data <- testing(data_split)
 # Since Country variable contains a lot of options, it's simpler to hardcode the
 # countries to the most frequent ones. If a country has less than 1% of rows, we
 # lump it under the "Other" category
-country_list <- levels((train_data %>%
+country_list2 <- levels((train_data %>%
             select(Country) %>%
             mutate(
                 Country = Country %>% fct_lump_prop(prop = 0.01, other_level = "Other")
             ))[["Country"]])
-paste(country_list, sep = "\n")
-cat(paste0('"', country_list, '"', collapse = ", "))
+paste(country_list2, sep = "\n")
+cat(paste0('"', country_list2, '"', collapse = ", "))
 
 show_engines("linear_reg")
 lm_spec <- linear_reg() %>% set_engine("lm")
