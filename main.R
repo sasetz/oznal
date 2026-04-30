@@ -1,5 +1,6 @@
 library(tidyverse)
 library(infotheo)
+library(GGally)
 library(tidymodels)
 rm(list = ls())
 set.seed(124)
@@ -18,7 +19,7 @@ View(schema)
 View(data)
 cat("Rows:", nrow(data), ", Cols:", ncol(data), "\n")
 
-#---- 2. Variable inventory + data quality ----
+#---- 2. EDA and Data Cleaning ----
 
 # First, let's see what variables we're working with
 data %>%
@@ -183,6 +184,13 @@ view_explode_distinct <- function(x, variable) {
         View()
 }
 
+# Inspecting the ConvertedCompYearly variable, we can see that it contains a lot
+# of missing values, which don't mean a lot for our task. Let's drop these rows,
+# so we end up with a much smaller dataset length (about 50% of original 49k)
+
+data <- data %>%
+    drop_na(ConvertedCompYearly) %>%
+    filter(ConvertedCompYearly > 0)
 
 # The data set contains a lot of categorical variables. Let's inspect them
 # using simple histograms and save them to disk for easy retrieval
@@ -202,7 +210,7 @@ histogram <- function(x, name) {
 }
 
 hist_results <- data %>%
-    select(all_of(nominal_columns), all_of(ordinal_columns)) %>%
+  select(all_of(nominal_columns), all_of(ordinal_columns)) %>%
   imap(~histogram(.x, .y))
 walk(names(hist_results), function(v) {
     p <- hist_results[[v]]
@@ -219,6 +227,61 @@ walk(names(hist_results), function(v) {
 # are high-cardinal variables (Country) and a lot of those variables
 # are dominated by one or two values
 
+# Let's also map the categorical variables using violin plots in how they
+# compare to the ConvertedCompYearly
+
+violin <- function(x) {
+    ggplot(mapping = aes(x = x, y = data$ConvertedCompYearly, fill = x)) +
+        geom_violin() +
+        geom_jitter(color="black", size=0.2, alpha=0.6) +
+        theme_minimal() +
+        theme(axis.text.x = element_blank()) +
+        coord_transform(ylim = quantile(data$ConvertedCompYearly, .99, na.rm = TRUE) * c(0, 1))
+}
+
+violin_results <- data %>%
+    select(all_of(nominal_columns), all_of(ordinal_columns)) %>%
+    map(violin)
+
+walk(names(violin_results), function(v) {
+    p <- violin_results[[v]]
+    ggsave(
+        filename = file.path("output", "plots", paste0("violin_", v, ".png")),
+        plot = p,
+        width = 9,
+        height = 6,
+        dpi = 140
+    )
+})
+
+# Let's see the distributions of yearly compensations in relation to employment
+# status and country. We have to cut the outliers first, as there are quite a
+# few of them, and group the countries into a factor of 20, so that they don't
+# blow out the plot. These distributions tell us that the ConvertedCompYearly
+# is heavily dependent on the country, and they are just different distributions
+# altogether. This will be very important for modeling later
+library(ggridges)
+high_cutoff <- quantile(
+    data$ConvertedCompYearly,
+    probs=c(.25, .75)
+    )[2] + 1.5 * IQR(data$ConvertedCompYearly)
+data %>%
+    #filter(Employment == "Employed" | Employment == "Independent contractor, freelancer, or self-employed") %>%
+    mutate(
+        Country = fct_lump_n(Country, n = 20) %>%
+            fct_recode(
+                "USA" = "United States of America",
+                "UK"  = "United Kingdom of Great Britain and Northern Ireland"
+            )
+           ) %>%
+    select(ConvertedCompYearly, Employment, Country) %>%
+    filter(ConvertedCompYearly <= high_cutoff) %>%
+    ggplot(mapping = aes(x = ConvertedCompYearly, y = Country, fill = Country)) +
+    geom_density_ridges() +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    facet_wrap(~Employment) +
+    coord_transform(xlim = c(0, high_cutoff))
 
 # Distribution of target variable
 summary(data_filtered$ConvertedCompYearly)
@@ -591,18 +654,12 @@ ordinal_recipe <- nominal_recipe %>%
 # NUMERIC COLUMNS
 # ---
 
+# Numeric columns are simplest to replace with their medians, we'll come back to
+# them later
 
 numeric_recipe <- ordinal_recipe %>%
     step_impute_median(has_role("numeric")) %>%
     prep()
-
-numeric_recipe %>%
-    step_rm(-has_role("numeric")) %>%
-    prep() %>%
-    bake(new_data = NULL) %>%
-    View()
-
-
 data_cleaned %>%
     select(WorkExp, Age) %>%
     ggplot(mapping = aes(x = WorkExp, y = Age, fill = Age)) +
@@ -615,6 +672,21 @@ data_cleaned %>%
 # These columns contain answers to questions that can be interpreted as multiple
 # features. Let's determine the relevant ones and split them
 
+data %>%
+    select(ConvertedCompYearly) %>%
+    summarise(across(everything(), ~ sum(!is.na(.)))) %>%
+    View()
+
+#---- 3. Linear regression ----
+
+# First of all, let's check the correlation between the variables. We don't want
+# collinear variables. Starting from ordinal and numeric variables, let's build
+# correlation matrices
+
+# The following correlation matrix eliminates a few variables:
+# - Age, WorkExp and YearsCode are strongly correlated, we'll have to take one
+# - SO prefixed variables (StackOverflow) are all correlated. This is probably due to value imputation
+# - Same thing for AI related questions (except AIThreat)
 library(GGally)
 numeric_recipe %>%
     step_rm(-has_role("ordinal"), -has_role("numeric"), -has_role("outcome")) %>%
@@ -632,7 +704,6 @@ numeric_recipe %>%
     step_dummy(has_role("nominal"), one_hot = TRUE) %>%
     prep() %>%
     bake(new_data = NULL)
-
 
 # ENCODING ALL FEATURES
 # ---
@@ -665,3 +736,22 @@ final_data %>%
     names_pattern = "(.*)_(class|missing|n_unique|n|variance)"
   ) %>%
   View()
+lr_recipe <- numeric_recipe %>%
+    step_naomit(has_role("outcome")) %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+    step_rm(Country, Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
+    step_dummy(has_role("nominal"), one_hot = TRUE) %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
+    prep()
+
+lr_recipe %>%
+    bake(new_data = NULL) -> clean_data
+    #View()
+
+
+model <- linear_reg()
+lm_fit <-
+    model %>%
+    fit(ConvertedCompYearly ~ ., data = clean_data); lm_fit
+
+View(tidy(lm_fit))
