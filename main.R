@@ -736,22 +736,37 @@ final_data %>%
     names_pattern = "(.*)_(class|missing|n_unique|n|variance)"
   ) %>%
   View()
+# Let's prepare our variables for fitting the linear regression model. We'll use
+# residual sum of squares, lm engine
+# Filtering ConvertedCompYearly outliers using IQR, removing all unclean
+# variables, encoding categorical variables.
+
 lr_recipe <- numeric_recipe %>%
     step_naomit(has_role("outcome")) %>%
+    step_filter(ConvertedCompYearly <= high_cutoff) %>%
     step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
     step_rm(Country, Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
     step_dummy(has_role("nominal"), one_hot = TRUE) %>%
-    step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
-    prep()
+    step_ordinalscore(has_role("ordinal"), -c("JobSat"))
 
-lr_recipe %>%
-    bake(new_data = NULL) -> clean_data
-    #View()
+# Splitting data. Using a simple proportion of 80/20
+set.seed(142)
+data_split <- initial_split(data, prop = .8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
 
+show_engines("linear_reg")
+lm_spec <- linear_reg() %>% set_engine("lm")
 
-model <- linear_reg()
-lm_fit <-
-    model %>%
-    fit(ConvertedCompYearly ~ ., data = clean_data); lm_fit
+workflow() %>%
+    add_recipe(lr_recipe) %>%
+    add_model(lm_spec) %>%
+    last_fit(data_split) -> lm_fit_result
+
+lm_fit_result %>% collect_metrics()
+lm_fit_result %>% collect_predictions()
+lm_fit_result %>% extract_workflow()
 
 View(tidy(lm_fit))
+View(lm_fit) # same as summary(lm_fit)
+lm_fit
