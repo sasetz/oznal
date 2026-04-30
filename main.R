@@ -697,9 +697,26 @@ lr_recipe <- final_recipe %>%
     step_naomit(has_role("outcome")) %>%
     step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
     step_rm(Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
-    step_dummy(has_role("nominal"), one_hot = TRUE) %>%
+    step_dummy(has_role("nominal"), one_hot = FALSE) %>%
     step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+    step_rm("Country_United.Kingdom.of.Great.Britain.and.Northern.Ireland",
+            "EdLevel_Other",
+            "RemoteWork_Flexible",
+            "Country_Canada",
+            "DevType_BusinessAnalyst",
+            "DevType_SysAdmin",
+            "MainBranch_Adjacent",
+            "Industry_None",
+            "MainBranch_ExDeveloper",
+            "Industry_Insurance",
+            "DevType_Support",
+            "Industry_Government",
+            "EdLevel_Primary"
+    ) %>%
     step_ordinalscore(has_role("ordinal"), -c("JobSat"))
+    #step_nzv(all_predictors()) %>%
+    #step_lincomb(all_predictors()) %>%
+    #step_normalize(all_predictors())
 
 # Splitting data. Using a simple proportion of 80/20
 set.seed(142)
@@ -719,23 +736,41 @@ paste(country_list2, sep = "\n")
 cat(paste0('"', country_list2, '"', collapse = ", "))
 
 show_engines("linear_reg")
-lm_spec <- linear_reg() %>% set_engine("lm")
+lr_spec <- linear_reg() %>% set_engine("lm")
+lr_metrics <- metric_set(rmse, mae, rsq)
 
 workflow() %>%
     add_recipe(lr_recipe) %>%
-    add_model(lm_spec) %>%
-    last_fit(data_split) -> lm_fit_result
+    add_model(lr_spec) %>%
+    last_fit(data_split, metrics = lr_metrics) -> lm_fit_result
 
-lr_recipe %>%
-    prep() %>%
-    bake(new_data = test_data) %>%
-    summarise_all(~ sum(is.na(.))) %>%
-    View()
-
+lm_fit_result %>% extract_workflow() %>% tidy(conf.int = TRUE) %>% View()
 lm_fit_result %>% collect_metrics()
-lm_fit_result %>% collect_predictions()
-lm_fit_result %>% extract_workflow()
 
+lm_fit_result %>%
+    collect_predictions() %>%
+    ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
+    geom_point(alpha = 0.3, color = "gray50") +
+    geom_abline(lty = 2, color = "red3") + # The "perfect prediction" line
+    coord_obs_pred() +                   # Standardizes the axes for regression
+    labs(title = "Predicted vs. Truth",
+         subtitle = "Linear Regression Performance") +
+    theme_minimal()
+
+lm_fit_result %>%
+    collect_predictions() %>%
+    mutate(.resid = ConvertedCompYearly - .pred) %>%
+    ggplot(aes(x = .pred, y = .resid)) +
+    geom_point(alpha = 0.4, color = "gray50") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+    geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+    labs(
+        title = "Residual vs. Fitted Plot",
+        subtitle = "Checking for homoscedasticity and linearity",
+        x = "Predicted Values",
+        y = "Residuals"
+    ) +
+    theme_minimal()
 
 #---- 4. Random forest ----
 
