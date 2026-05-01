@@ -837,6 +837,7 @@ ggplot(rf_preds) +
 #---- 5. SVM ----
 svm_recipe <- final_recipe %>%
   step_naomit(has_role("outcome")) %>%
+  # step_rm(contains("Country"))%>%
   step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
   step_rm(Age, YearsCode) %>%
   step_log(ConvertedCompYearly, base = 10) %>%
@@ -882,6 +883,22 @@ swm_fit_result %>%
        y = "Predicted") +
   theme_minimal()
 
+
+swm_fit_result %>%
+  collect_predictions() %>%
+  mutate(.resid = ConvertedCompYearly - .pred) %>%
+  ggplot(aes(x = .pred, y = .resid)) +
+  geom_point(alpha = 0.4, color = "gray50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+  geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+  labs(
+    title = "Residual vs. Fitted Plot SVM",
+    subtitle = "Checking for homoscedasticity and linearity",
+    x = "Predicted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
 swm_fit_result %>% extract_workflow()
 
 library(vip)
@@ -898,13 +915,13 @@ importance_df <- data.frame(
   ) %>%
   filter(Variable != "Bias") 
 
-top_10 <- importance_df %>%
-  slice_max(abs(Importance), n = 10) %>%
+top_15 <- importance_df %>%
+  slice_max(abs(Importance), n = 15) %>%
   mutate(Variable = reorder(Variable, Importance))
-top_10 
+top_15 
 
 
-ggplot(top_10, aes(x = Importance, y = Variable, fill = Importance > 0)) +
+ggplot(top_15, aes(x = Importance, y = Variable, fill = Importance > 0)) +
   geom_col() +
   scale_fill_manual(
     values = c("firebrick", "steelblue"), 
@@ -912,9 +929,201 @@ ggplot(top_10, aes(x = Importance, y = Variable, fill = Importance > 0)) +
   ) +
   labs(
     title = "Top 10 Feature Importance (SVM)",
-    subtitle = "Factors affecting yearly compensation",
+    subtitle = "Factors affecting ConvertedCompYearly",
     x = "Model Coefficient (Weight)",
     y = NULL,
     fill = "Impact"
   ) +
   theme_minimal()
+
+
+#---- 2 scenario ----
+
+#-----Forward ----
+
+
+lr_recipe2 <- final_recipe %>%
+  step_naomit(has_role("outcome")) %>%
+  step_log(ConvertedCompYearly, base = 10) %>%
+  step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+  step_rm(Age, YearsCode) %>%
+  step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+  step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+  step_ordinalscore(has_role("ordinal"), -c("JobSat"))  %>%
+  step_corr(all_numeric_predictors(), threshold = 0.7) %>%
+  step_normalize(all_numeric_predictors())
+
+lr_recipe2_prepped <- lr_recipe2 %>% 
+    prep(training = train_data)
+  
+train_data_baked <- bake(lr_recipe2_prepped, new_data = NULL)
+
+
+null_model <- lm(ConvertedCompYearly ~ 1, data = train_data_baked)
+
+full_model <- lm(ConvertedCompYearly ~ ., data = train_data_baked)
+
+n <- nrow(train_data_baked)
+
+forward_step_model <- stats::step(
+  null_model, 
+  k = log(n),
+  direction = "forward", 
+  scope = list(lower = null_model, upper = full_model), 
+  trace = 1 # постав 1, якщо хочеш бачити процес додавання кожної змінної
+)
+
+features_count <- length(coef(forward_step_model)) - 1
+print(features_count)
+
+summary(forward_step_model)
+
+forward_results <- augment(forward_step_model)
+
+forward_results %>%
+  ggplot(aes(x = .fitted, y = .resid)) +
+  geom_point(alpha = 0.4, color = "gray50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+  geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+  labs(
+    title = "Residual vs. Fitted Plot: Forward Selection",
+    subtitle = "Checking for homoscedasticity and linearity after feature selection",
+    x = "Predicted Values (Log Scale)",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+tidy(forward_step_model) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(abs_estimate = abs(estimate)) %>%
+  slice_max(abs_estimate, n = 20) %>% # Беремо тільки топ-20
+  mutate(term = reorder(term, estimate)) %>%
+  ggplot(aes(x = term, y = estimate, fill = estimate > 0)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("firebrick", "dodgerblue4"), 
+                    labels = c("Negative", "Positive")) +
+  labs(title = "Top 20 Most Influential Features (Forward Selection)",
+       x = "Feature", y = "Log-Coefficient (Impact)") +
+  theme_minimal()
+
+
+test_data_baked <- bake(lr_recipe2_prepped, new_data = test_data)
+
+test_predictions <- predict(forward_step_model, newdata = test_data_baked)
+
+
+
+evaluation_table <- data.frame(
+  actual = test_data_baked$ConvertedCompYearly,
+  predicted = test_predictions
+)
+
+library(yardstick)
+metrics <- evaluation_table %>%
+  metrics(truth = actual, estimate = predicted)
+
+print(metrics)
+
+ggplot(evaluation_table, aes(x = actual, y = predicted)) +
+  geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
+  geom_point(alpha = 0.1, color = "midnightblue") +
+  labs(
+    title = "Actual vs Predicted Salary (Forward Selection)",
+    subtitle = "Log-transformed Scale (test)",
+    x = "Actual Salary (Log)",
+    y = "Predicted Salary (Log)"
+  ) +
+  theme_minimal()
+
+#----Lasso ---
+
+
+lr_recipe_lasso <- final_recipe %>%
+  step_naomit(has_role("outcome")) %>%
+  step_log(ConvertedCompYearly, base = 10) %>%
+  step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+  step_rm(Age, YearsCode) %>%
+  step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+  step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+  step_ordinalscore(has_role("ordinal"), -c("JobSat"))  %>%
+  step_corr(all_numeric_predictors(), threshold = 0.7) %>%
+  step_normalize(all_numeric_predictors())
+
+lasso_spec <- linear_reg(
+  penalty = 0.01, 
+  mixture = 1     
+) %>%
+  set_engine("glmnet") %>%
+  set_mode("regression")
+
+workflow() %>%
+  add_recipe(lr_recipe_lasso) %>%
+  add_model(lasso_spec) %>%
+  last_fit(data_split) -> lasso_fit_result
+
+
+lasso_fit_result %>% collect_metrics()
+
+lasso_predictions <- lasso_fit_result %>% collect_predictions()
+
+ggplot(lasso_predictions, aes(x = ConvertedCompYearly, y = .pred)) +
+  geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
+  geom_point(alpha = 0.2, color = "darkgreen") +
+  labs(
+    title = "Actual vs Predicted Salary (Lasso Regression) ",
+    subtitle = "Log-transformed Scale, Penalty = 0.01",
+    x = "Actual Salary (Log)",
+    y = "Predicted Salary (Log)"
+  ) +
+  theme_minimal()
+
+lasso_predictions %>%
+  mutate(.resid = ConvertedCompYearly - .pred) %>%
+  ggplot(aes(x = .pred, y = .resid)) +
+  geom_point(alpha = 0.4, color = "gray50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+  geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+  labs(
+    title = "Residual vs. Fitted Plot SVM",
+    subtitle = "Checking for homoscedasticity and linearity",
+    x = "Predicted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+model_obj <- lasso_fit_result %>% 
+  extract_fit_parsnip()
+
+importance_df <- tidy(model_obj) %>%
+  filter(term != "(Intercept)") %>%
+  filter(estimate != 0) %>%
+  mutate(abs_importance = abs(estimate)) %>%
+  arrange(desc(abs_importance))
+
+nrow(importance_df)
+print(importance_df)
+
+top_20 <- importance_df %>%
+  slice_max(abs(estimate), n = 20) %>%
+  mutate(term = reorder(term, estimate))
+top_20 
+
+
+ggplot(top_20, aes(x = estimate, y = term, fill = estimate > 0)) +
+  geom_col() +
+  scale_fill_manual(
+    values = c("firebrick", "steelblue"), 
+    labels = c("Negative Impact", "Positive Impact")
+  ) +
+  labs(
+    title = "Top 20 Feature Importance (Lasso)",
+    subtitle = "Log-Coefficient Impact on Salary",
+    x = "Model Coefficient (Estimate)",
+    y = NULL,
+    fill = "Impact Direction"
+  ) +
+  theme_minimal()
+
+#----Ridge ---
+
