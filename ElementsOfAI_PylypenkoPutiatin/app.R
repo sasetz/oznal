@@ -107,6 +107,14 @@ data_cleaned <- data_cleaned %>%
     )
 
 #---- 5. Recipes ----
+roles_recipe <- recipe(
+    data = data_cleaned,
+    formula = ConvertedCompYearly ~ .
+) %>%
+    add_role(all_of(nominal_columns), new_role = "nominal") %>%
+    add_role(all_of(ordinal_columns), new_role = "ordinal") %>%
+    add_role(all_of(numeric_columns), new_role = "numeric") %>%
+    add_role(starts_with(tech_usage_column_prefixes), new_role = "tech")
 country_list <- c("Australia", "Austria", "Brazil", "Canada", "Czech Republic", "France", "Germany", "India", "Italy", "Netherlands", "Poland", "Portugal", "Spain", "Sweden", "Switzerland", "Ukraine", "United Kingdom of Great Britain and Northern Ireland", "United States of America")
 nominal_recipe <- roles_recipe %>%
     step_factor2string(has_role("nominal")) %>%
@@ -343,6 +351,66 @@ corr_data = list(
         bake(new_data = NULL)
 )
 
+#---- Workflows ----
+
+set.seed(142)
+data_split <- initial_split(data_cleaned, prop = .8)
+
+lr_recipe <- final_recipe %>%
+    step_naomit(has_role("outcome")) %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+    step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat"))
+#step_nzv(all_predictors()) %>%
+#step_lincomb(all_predictors()) %>%
+#step_normalize(all_predictors())
+
+lr_spec <- linear_reg(engine = "lm")
+lr_metrics <- metric_set(rmse, mae, rsq)
+
+lr_removed_vars <- c(
+    "Industry_Higher.Education",
+    "MainBranch_Occasional",
+    "Country_United.Kingdom.of.Great.Britain.and.Northern.Ireland",
+    "EdLevel_Other",
+    "RemoteWork_Flexible",
+    "Country_Canada",
+    "DevType_BusinessAnalyst",
+    "DevType_SysAdmin",
+    "MainBranch_Adjacent",
+    "Industry_None",
+    "MainBranch_ExDeveloper",
+    "Industry_Insurance",
+    "DevType_Support",
+    "Industry_Government",
+    "EdLevel_Primary",
+    "Age",
+    "YearsCode"
+)
+lr_removed_prefixes <- c("SO", "AI")
+
+
+rf_recipe <- final_recipe %>%
+    step_naomit(has_role("outcome")) %>%
+    #step_log(all_outcomes()) %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+    #step_rm(Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
+    #step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+    #step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
+    step_integer(has_role("nominal"))
+
+rf_spec <- rand_forest(
+    mode = "regression",
+    engine = "ranger",
+    trees = 2000,
+    mtry = 10,
+    min_n = 2)
+rf_metrics <- metric_set(mse, mae, mape, rmse)
+rf_workflow <-
+    workflow() %>%
+    add_recipe(rf_recipe) %>%
+    add_model(rf_spec)
 #---- 6. Pages ----
 
 distributions_page <-
@@ -381,6 +449,36 @@ correlations_page <-
                   plotlyOutput("data_correlation"),
               ))
 
+lr_page <-
+    nav_panel("Linear Regression",
+              sidebarLayout(
+                  sidebarPanel(
+                      checkboxInput("lr_log", "Log scale outcome", value = FALSE),
+                      checkboxInput("lr_normalize", "Normalize numeric predictors", value = FALSE),
+                      checkboxInput("lr_drop_corr", "Drop correlated predictors", value = FALSE),
+                      conditionalPanel(
+                          condition = "input.lr_drop_corr == true",
+                          sliderInput("lr_corr_threshold", "Correlation threshold",
+                                      min = 0.5, max = 0.95, value = 0.7, step = 0.05)
+                      ),
+                      selectizeInput(
+                          "lr_variables",
+                          "Predictors",
+                          choices = NULL,
+                          selected = NULL,
+                          multiple = TRUE,
+                          options = list(plugins = list("remove_button"))
+                      )
+                  ),
+                  mainPanel(
+                      plotlyOutput("model_lr_residual"),
+                      plotlyOutput("model_lr_plot"),
+                      tableOutput("model_lr_metrics"),
+                      tableOutput("model_lr_tidy")
+                      ),
+              ))
+
+
 #---- 7. UI ----
 ui <- page_navbar(
     nav_panel("Data",
@@ -391,14 +489,90 @@ ui <- page_navbar(
                   outcome_page,
                   correlations_page
               )),
-    nav_panel("Models", "Page B content"), 
+    nav_panel(
+        "Models",
+        navset_pill_list(
+            widths = c(2, 10),
+            lr_page
+        )), 
     nav_panel("Take the survey", "Page C content"), 
     title = "Elements of AI, Anna Pylypenko & Kirill Putiatin", 
     id = "main_page",
 )
 
 #---- 8. Server ----
-server <- function(input, output) {
+server <- function(input, output, session) {
+    lr_recipe_dynamic <- reactive({
+        rec <- lr_recipe
+        if (isTRUE(input$lr_log)) {
+            rec <- rec %>% step_log(all_outcomes(), base = 10)
+        }
+        if (isTRUE(input$lr_normalize)) {
+            rec <- rec %>% step_normalize(all_numeric_predictors())
+        }
+        if (isTRUE(input$lr_drop_corr)) {
+            rec <- rec %>% step_corr(all_numeric_predictors(), threshold = input$lr_corr_threshold)
+        }
+        rec
+    })
+    lr_baked <- reactive({
+        prepped <- lr_recipe_dynamic() %>% prep(training = training(data_split))
+        list(
+            prepped = prepped,
+            train = bake(prepped, new_data = training(data_split)),
+            test = bake(prepped, new_data = testing(data_split))
+        )
+    })
+    lr_predictors <- reactive({
+        lr_baked()$train %>%
+            select(-ConvertedCompYearly) %>%
+            colnames()
+    })
+    lr_default_vars <- reactive({
+        vars <- lr_predictors()
+        vars <- vars[!vars %in% lr_removed_vars]
+        vars <- vars[!str_detect(vars, paste0("^(", paste(lr_removed_prefixes, collapse = "|"), ")"))]
+        vars
+    })
+    observeEvent(lr_predictors(), {
+        selected <- if (is.null(input$lr_variables) || length(input$lr_variables) == 0) {
+            lr_default_vars()
+        } else {
+            intersect(input$lr_variables, lr_predictors())
+        }
+        if (length(selected) == 0) {
+            selected <- lr_default_vars()
+        }
+        updateSelectizeInput(
+            session,
+            "lr_variables",
+            choices = lr_predictors(),
+            selected = selected
+        )
+    })
+    lr_model <- reactive({
+        req(input$lr_variables)
+        req(length(input$lr_variables) > 0)
+        print("Calculating Linear Regression...")
+        baked <- lr_baked()
+        train_data <- baked$train %>%
+            select(all_of(c("ConvertedCompYearly", input$lr_variables)))
+        test_data <- baked$test %>%
+            select(all_of(c("ConvertedCompYearly", input$lr_variables)))
+        lr_formula <- as.formula(
+            paste("ConvertedCompYearly ~", paste(input$lr_variables, collapse = " + "))
+        )
+        fit <- lr_spec %>% fit(lr_formula, data = train_data)
+        preds <- predict(fit, new_data = test_data) %>%
+            bind_cols(test_data %>% select(ConvertedCompYearly))
+        metrics <- lr_metrics(preds, truth = ConvertedCompYearly, estimate = .pred)
+        list(
+            fit = fit,
+            preds = preds,
+            metrics = metrics,
+            tidy = tidy(fit)
+        )
+    })
     output$data_histogram <- renderPlotly({
         plot_fns <- list(
             "multichoice" = multichoice_histogram,
@@ -437,6 +611,44 @@ server <- function(input, output) {
             ggcorr(corr_data[[input$data_correlation]], hjust = 2, size = 2)
         )
     })
+    
+    output$model_lr_plot <- renderPlotly({
+           req(lr_model())
+        ggplotly(
+               lr_model()$preds %>%
+                ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
+                geom_point(alpha = 0.3, color = "gray50") +
+                geom_abline(lty = 2, color = "red3") + # The "perfect prediction" line
+                coord_obs_pred() +                   # Standardizes the axes for regression
+                labs(title = "Predicted vs. Truth",
+                     subtitle = "Linear Regression Performance") +
+                theme_minimal()
+        )
+    })
+    
+    output$model_lr_residual <- renderPlotly({
+        req(lr_model())
+        ggplotly(
+            lr_model()$preds %>%
+                mutate(.resid = ConvertedCompYearly - .pred) %>%
+                ggplot(aes(x = .pred, y = .resid)) +
+                geom_point(alpha = 0.4, color = "gray50") +
+                geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+                geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+                labs(
+                    title = "Residual vs. Fitted Plot",
+                    subtitle = "Checking for homoscedasticity and linearity",
+                    x = "Predicted Values",
+                    y = "Residuals"
+                ) +
+                theme_minimal()
+        )
+    })
+
+    output$model_lr_tidy <- renderTable(striped = TRUE,
+        lr_model()$tidy)
+    output$model_lr_metrics <- renderTable(striped = TRUE,
+                                        lr_model()$metrics)
 }
 
 shinyApp(ui = ui, server = server)

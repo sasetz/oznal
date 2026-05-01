@@ -1,0 +1,667 @@
+---
+title: "Capstone Project, Elements of AI 2026"
+author: "Anna Pylypenko, Kirill Putiatin"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(infotheo)
+library(GGally)
+library(tidymodels)
+library(ggridges)
+```
+
+# The Quest
+
+The dataset we've chosen for this project is [Stack Overflow's Developer Survey 2025](https://survey.stackoverflow.co/2025/). This dataset contains a lot of interesting questions about the developers occupation, tools, technologies, and opinions. The task we've chosen for this dataset is predicting a given developer's yearly income using the questions in the survey.
+
+The dataset contains over 150 variables and 49 000 rows. Unfortunately, a lot of those data points are either mostly unrelated noise or missing values, so this number will drop drastically as we get closer to fitting the models. It is a quite messy dataset with a lot of cleaning to do, so let's start by loading the data.
+
+# Data Cleaning and EDA
+
+The dataset contains two CSV files: schema and data itself. Schema is a handy list of the majority of quesions, providing available answer options to them. When we discuss the questions closer, this table will be very useful for reference. The second file is the one we're looking for, let's confirm that it's indeed loaded
+
+```{r data_load}
+schema <- read_csv("data/survey_results_schema.csv", show_col_types = FALSE)
+data <- read_csv("data/survey_results_public.csv", show_col_types = FALSE)
+cat("Rows:", nrow(data), ", Cols:", ncol(data), "\n")
+data %>% head(5)
+```
+
+First, let's see what variables we're working with
+
+```{r check_variables}
+data %>%
+  summarise(across(everything(), list(
+    class = ~ class(.x)[1],
+    missing = ~ sum(is.na(.x) | .x == ""),
+    n_unique = ~ n_distinct(.x, na.rm = TRUE),
+    n = ~ sum(!is.na(.x) & .x != ""),
+    variance = ~ var(.x, na.rm = TRUE)
+  ))) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("variable", ".value"),
+    names_pattern = "(.*)_(class|missing|n_unique|n|variance)"
+  )
+
+```
+Clean the target variable by removing rows with na values.
+In the 'Employment' and 'Devtype' columns, there are many illogical values,
+such as 'unemployed' with a filled 'devtype' field. We remove all such records,
+keeping only those where the person is employed and has devtype.
+
+```{r filter_na_comp}
+data <- data %>%
+  drop_na(ConvertedCompYearly) %>%
+  filter(ConvertedCompYearly > 0) %>%
+  filter(DevType != 'Student',
+         DevType != 'Retired',
+         DevType != 'Other (please specify):' ) %>%
+  filter(Employment != 'Retired',
+         Employment != 'Not employed',
+         Employment != 'I prefer not to say' )
+```
+
+## Columns overview
+
+The dataset is quite messy, as it is a survey with a lot of open-ended
+questions, multi-choice, rating, and matrix questions. We’ve observed that
+many columns have more than 50% missing values, making it unwise to handle them.
+Therefore, we will focus on columns with less than 50% missing data. The variables
+can be grouped into rough groups on how they can be handled:
+- drop_columns: open-ended questions, ResponseId and CompTotal. Reasoning for removing CompTotal is that we will use ConvertedCompYearly instead, which is directly calculated from CompTotal
+- multifactor_columns: ordinal variables that need splitting into multiple features
+- rate_column_prefixes: prefixes for rating questions
+- multichoice_columns: multi-choice questions that need splitting into multiple features
+- tech_usage_column_prefixes: prefixes for columns that indicate the usage of a certain technology. These require substantial cleaning, since they are most likely to contain a lot of noise
+- double_multichoice_prefixes: multi-choice questions that will be converted as regular multi-choices, but each option will be an ordinal feature. See further sections for more info
+
+Our aim is to predict the total annual salary based on various predictors
+and identify the most significant ones. Since we have 150 columns, we
+first logically select 37 columns that are likely to influence ConvertedCompYearly.
+The survey contains many different types of questions, so many of them may not be
+relevant.
+
+```{r columns_definitions}
+nominal_columns <- c("MainBranch", "EdLevel", "Employment",
+                     "DevType", "ICorPM", "RemoteWork",
+                     "Industry", "Country")
+ordinal_columns <- c("Age", "OrgSize", "AIThreat", "SOAccount", "SOVisitFreq",
+                     "SODuration",
+                     "AISelect", "AISent", "AIAcc", "AIComplex", "AIAgents","AIAgentChange",
+                     "JobSat")
+numeric_columns <- c("WorkExp", "YearsCode", "ToolCountWork")
+
+tech_usage_column_prefixes <- c("LanguageHaveWorkedWith", "DatabaseHaveWorkedWith", "PlatformHaveWorkedWith",
+                                "WebframeHaveWorkedWith",  "DevEnvsHaveWorkedWith", "AIModelsHaveWorkedWith",
+                                "CommPlatformHaveWorkedWith", "OfficeStackAsyncHaveWorkedWith", "OpSysProfessional use")
+
+selected_features <- c(nominal_columns, ordinal_columns, numeric_columns,tech_usage_column_prefixes,"ConvertedCompYearly")
+
+data_filtered <- data %>%
+  select(all_of(selected_features))
+
+cat("Rows:", nrow(data_filtered), ", Cols:", ncol(data_filtered), "\n")
+
+```
+
+We see that our dataset have mostly character columns and only 5 numeric
+```{r check_classes}
+table(sapply(data_filtered, class))
+```
+
+Next, we inspect the distributions of the variables. We're using histogram and violin plots for that to better understand what kind of distributions we have. We save those plots to disk for easy inspection. This part is excluded from the documentation, but you can find it in the Rscript file.
+
+## Predicted variable
+
+Let's inspect the predicted variable - ConvertedCompYearly. Most of the developers entered their income in local currency, so this variable is a cleaner version of the CompTotal variable. Here are some basic metrics:
+```{r comp_distribution}
+summary(data_filtered$ConvertedCompYearly)
+```
+
+And a histogram to better understand the distribution as well.
+```{r comp_histogram, echo=FALSE}
+ggplot(data_filtered, aes(x = ConvertedCompYearly)) +
+  geom_histogram(fill = "steelblue", bins = 1000) +
+  coord_cartesian(xlim = c(0, 500000)) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Yearly Compensation",
+    subtitle = "Zoomed to $0 - $500k to handle outliers",
+    x = "Salary (USD)",
+    y = "Count"
+  )
+```
+As we can see, there are a lot of outliers that are skewing the plot. Let's select cutoff points to remove them.
+
+```{r comp_outliers}
+lower_bound <- quantile(data_filtered$ConvertedCompYearly, 0.025, na.rm = TRUE)
+upper_bound <- quantile(data_filtered$ConvertedCompYearly, 0.975, na.rm = TRUE)
+data_cleaned <- data_filtered %>%
+  filter(ConvertedCompYearly >= lower_bound & ConvertedCompYearly <= upper_bound)
+lower_bound; upper_bound
+```
+Let's see the distributions of yearly compensations in relation to employment
+status and country. We have to cut the outliers first, as there are quite a
+few of them, and group the countries into a factor of 20, so that they don't
+blow out the plot. These distributions tell us that the ConvertedCompYearly
+is heavily dependent on the country, which can be helpful for modeling later
+```{r comp_country_dist, echo=FALSE}
+data_cleaned %>%
+    mutate(
+        Country = fct_lump_n(Country, n = 20) %>%
+            fct_recode(
+                "USA" = "United States of America",
+                "UK"  = "United Kingdom of Great Britain and Northern Ireland"
+            )
+           ) %>%
+    select(ConvertedCompYearly, Employment, Country) %>%
+    filter(ConvertedCompYearly <= upper_bound) %>%
+    ggplot(mapping = aes(x = ConvertedCompYearly, y = Country, fill = Country)) +
+    geom_density_ridges() +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    facet_wrap(~Employment) +
+    coord_transform(xlim = c(0, upper_bound))
+```
+
+## Clean outliers in numeric values
+We see unusually large number of tools and years of code and WorkExp. We should eliminate those outliers
+```{r numeric_outliers}
+summary(data_cleaned$WorkExp)
+summary(data_cleaned$YearsCode)
+summary(data_cleaned$ToolCountWork)
+
+upper_bound_w <- quantile(data_filtered$WorkExp, 0.99, na.rm = TRUE)
+upper_bound_w
+upper_bound_y <- quantile(data_filtered$YearsCode, 0.99, na.rm = TRUE)
+upper_bound_y
+upper_bound_t <- quantile(data_filtered$ToolCountWork, 0.98, na.rm = TRUE)
+upper_bound_t
+data_cleaned <- data_cleaned %>%
+  mutate(
+    WorkExp = if_else(WorkExp > upper_bound_w, upper_bound_w, WorkExp),
+    YearsCode = if_else(YearsCode > upper_bound_y, upper_bound_y, YearsCode),
+    ToolCountWork = if_else(ToolCountWork > upper_bound_t, upper_bound_t, ToolCountWork)
+  )
+```
+
+This is the resulting data after pre-processing
+```{r preprocess_summary}
+cat("Rows:", nrow(data_cleaned), ", Cols:", ncol(data_cleaned), "\n")
+```
+
+## Initial recipe
+
+Let's start a recipe. We'll start by assigning roles to our variables, which
+will help us to handle them later
+
+```{r roles_recipe}
+roles_recipe <- recipe(
+    data = data_cleaned,
+    formula = ConvertedCompYearly ~ .
+) %>%
+    add_role(all_of(nominal_columns), new_role = "nominal") %>%
+    add_role(all_of(ordinal_columns), new_role = "ordinal") %>%
+    add_role(all_of(numeric_columns), new_role = "numeric") %>%
+    add_role(starts_with(tech_usage_column_prefixes), new_role = "tech")
+```
+
+## Nominal variables
+
+MainBranch and Age are the only variables without missing values.
+One-by-one, let's handle missing values. For some of them, NA means an empty
+answer, not applicable, or "I prefer not to say". For some of them, we can
+fill NA with the mode.
+
+ICorPM is transformed into a IsPM variable. ICorPM has only 2 options:
+"People manager" and "Individual contributor". The rest of the options are NA,
+with the mode being the contributor. It doesn't make much sense to add another
+value to the variable, so we can effectively convert this variable to a binary
+one. This could be potentially useful information, judging by the domain.
+
+DevType doesn't have an additional free-text variable to work with, so it is
+logical to group the "Other" option with the "Prefer not to say" (missing)
+values.
+
+EdLevel is imputed with the least possible value. This variable could derive
+an ordinal feature that indicated the highest education level, but it would
+lose the information about the field of study in higher education. Another
+feature could be engineered, indicating the presence of a *higher* education.
+
+"Country" is a high-cardinal variable, meaning we have to eventually eliminate most of its options. There are many ways to do that, but most of them fail using the recipes. The recipes are prepared for train and test data separately, so the resulting columns may not coincide if the distribution of the countries differs even slightly. We ran into the issue when we tried to put an "Other" category of all countries that had less than 1% of the sample, but the countries that we were left with in train and test data were different. This is why the country factor is hard-coded, although it originates from that distribution (on training data).
+
+The rest of the variables are imputed with new "Missing" values, then their
+distinct options are renamed to better fit the encoding.
+
+Get all distinct values of a column, then print it into console in a format
+to be inserted into fct_recode(). Helpful for quick option renaming
+
+```{r nominal_recipe, echo=FALSE}
+country_list <- c("Australia", "Austria", "Brazil", "Canada", "Czech Republic", "France", "Germany", "India", "Italy", "Netherlands", "Poland", "Portugal", "Spain", "Sweden", "Switzerland", "Ukraine", "United Kingdom of Great Britain and Northern Ireland", "United States of America")
+
+nominal_recipe <- roles_recipe %>%
+    step_factor2string(has_role("nominal")) %>%
+    step_impute_mode(ICorPM, RemoteWork) %>%
+    step_mutate(
+        EdLevel = replace_na(EdLevel, "Primary/elementary school")
+    ) %>%
+    step_unknown(Industry, new_level = "None") %>%
+    step_mutate(
+        MainBranch = fct_recode(MainBranch,
+                                "Developer" = "I am a developer by profession",
+                                "Student" = "I am learning to code",
+                                "Occasional" = "I am not primarily a developer, but I write code sometimes as part of my work/studies",
+                                "Hobbyist" = "I code primarily as a hobby",
+                                "ExDeveloper" = "I used to be a developer by profession, but no longer am",
+                                "Adjacent" = "I work with developers or my work supports developers but am not a developer by profession"
+        ),
+        EdLevel = fct_recode(EdLevel,
+                             "Associate" = "Associate degree (A.A., A.S., etc.)",
+                             "Bachelor" = "Bachelor’s degree (B.A., B.S., B.Eng., etc.)",
+                             "Master" = "Master’s degree (M.A., M.S., M.Eng., MBA, etc.)",
+                             "Other" = "Other (please specify):",
+                             "Primary" = "Primary/elementary school",
+                             "Professional" = "Professional degree (JD, MD, Ph.D, Ed.D, etc.)",
+                             "Secondary" = "Secondary school (e.g. American high school, German Realschule or Gymnasium, etc.)",
+                             "Dropout" = "Some college/university study without earning a degree",
+        ),
+        Employment = fct_recode(Employment,
+                                "Independent" = "Independent contractor, freelancer, or self-employed",
+        ),
+        DevType = fct_recode(DevType,
+                             "Academic" = "Academic researcher",
+                             "MLEngineer" = "AI/ML engineer",
+                             "Scientist" = "Applied scientist",
+                             "Architect" = "Architect, software or solutions",
+                             "CloudEngineer" = "Cloud infrastructure engineer",
+                             "Cybersecurity" = "Cybersecurity or InfoSec professional",
+                             "DataEngineer" = "Data engineer",
+                             "BusinessAnalyst" = "Data or business analyst",
+                             "DataScientist" = "Data scientist",
+                             "DatabaseAdmin" = "Database administrator or engineer",
+                             "AIDeveloper" = "Developer, AI apps or physical AI",
+                             "Backend" = "Developer, back-end",
+                             "Desktop" = "Developer, desktop or enterprise applications",
+                             "Embedded" = "Developer, embedded applications or devices",
+                             "Frontend" = "Developer, front-end",
+                             "Fullstack" = "Developer, full-stack",
+                             "Game" = "Developer, game or graphics",
+                             "Mobile" = "Developer, mobile",
+                             "QA" = "Developer, QA or test",
+                             "DevOps" = "DevOps engineer or professional",
+                             "EngineeringManager" = "Engineering manager",
+                             "FinancialAnalyst" = "Financial analyst or engineer",
+                             "Founder" = "Founder, technology or otherwise",
+                             "ProductManager" = "Product manager",
+                             "ProjectManager" = "Project manager",
+                             "Executive" = "Senior executive (C-suite, VP, etc.)",
+                             "Support" = "Support engineer or analyst",
+                             "SysAdmin" = "System administrator",
+                             "Designer" = "UX, Research Ops or UI design professional",
+        ),
+        RemoteWork = fct_recode(RemoteWork,
+                                "Hybrid" = "Hybrid (some in-person, leans heavy to flexibility)",
+                                "Hybrid" = "Hybrid (some remote, leans heavy to in-person)",
+                                "InPerson" = "In-person",
+                                "Remote" = "Remote",
+                                "Flexible" = "Your choice (very flexible, you can come in when you want or just as needed)",
+        )
+    ) %>%
+    # convert ICorPM to IsPM (is People Manager)
+    step_rename(IsPM = ICorPM) %>%
+    step_mutate(IsPM = if_else(IsPM == "People manager", 1L, 0L)) %>%
+    step_mutate(
+        Country = factor(
+            if_else(
+                as.character(Country) %in% country_list,
+                Country,
+                "Other"
+            ),
+            levels = c(country_list, "Other")
+        )
+    )
+nominal_recipe
+```
+
+## Ordinal variables
+
+Ordinal variables require a set order, so we create the order from their meaning. There are a lot of missing values here, but in most cases we can handle them by inserting an appropriate level instead of the mode. A lot of the variables include the "Prefer not to say" option, so we can assume that the person who have left the field unmarked for any reason was meaning to select precisely that option.
+
+```{r ordinal_recipe,echo=FALSE}
+ordinal_recipe <- nominal_recipe %>%
+    step_mutate(
+        Age = Age %>%
+            factor(levels = c("Prefer not to say",
+                                "18-24 years old",
+                                "25-34 years old",
+                                "35-44 years old",
+                                "45-54 years old",
+                                "55-64 years old",
+                                "65 years or older"),
+                     ordered = TRUE)
+    ) %>%
+    step_mutate(
+        OrgSize = OrgSize %>%
+            factor(levels = c(
+                "None",
+                "Just me - I am a freelancer, sole proprietor, etc.",
+                "Less than 20 employees",
+                "20 to 99 employees",
+                "100 to 499 employees",
+                "500 to 999 employees",
+                "1,000 to 4,999 employees",
+                "5,000 to 9,999 employees",
+                "10,000 or more employees",
+                "I don't know"),
+                ordered = TRUE) %>%
+            fct_recode("None" = "I don't know") %>%
+            fct_na_value_to_level("None")
+    ) %>%
+    step_mutate(
+        AIThreat = AIThreat %>%
+            factor(ordered = TRUE,
+                   levels = c("No", "I'm not sure", "Yes")
+                   ) %>%
+            fct_recode("No" = "I'm not sure") %>%
+            fct_na_value_to_level("No") %>%
+            fct_relevel(c("No",
+                          "Yes"))
+    ) %>%
+    step_mutate(
+        SOAccount = SOAccount %>%
+            factor(levels = c("No",
+                          "Not sure/can't remember",
+                          "Yes"),
+                   ordered = TRUE) %>%
+            fct_na_value_to_level("Not sure/can't remember")
+    ) %>%
+    step_mutate(
+        SOVisitFreq = SOVisitFreq %>%
+            factor(ordered = TRUE,
+                   levels = c("Infrequently, less than once per year",
+                          "Less than once every 2 - 3 months",
+                          "Less than once per month or monthly",
+                          "A few times per month or weekly",
+                          "A few times per week",
+                          "Daily or almost daily",
+                          "Multiple times per day")) %>%
+            fct_na_value_to_level("Infrequently, less than once per year")
+    ) %>%
+    step_mutate(
+        SODuration = SODuration %>%
+            factor(ordered = TRUE, levels = c("I don't use Stack Overflow",
+                          "Less than one year",
+                          "Between 1 and 3 years",
+                          "Between 3 and 5 years",
+                          "Between 5 and 10 years",
+                          "Between 10 and 15 years",
+                          "More than 15 years, or since Stack Overflow started in 2008")) %>%
+            fct_na_value_to_level("I don't use Stack Overflow")
+    ) %>%
+    step_mutate(
+        AISelect = AISelect %>%
+            factor(ordered = TRUE, levels = c("No, and I don't plan to",
+                          "No, but I plan to soon",
+                          "Yes, I use AI tools monthly or infrequently",
+                          "Yes, I use AI tools weekly",
+                          "Yes, I use AI tools daily")) %>%
+            fct_na_value_to_level("Yes, I use AI tools monthly or infrequently")
+    ) %>%
+    step_mutate(
+        AISent = AISent %>%
+            factor(ordered = TRUE, levels = c("Very unfavorable",
+                          "Unfavorable",
+                          "Unsure",
+                          "Indifferent",
+                          "Favorable",
+                          "Very favorable")) %>%
+            fct_na_value_to_level("Indifferent")
+    ) %>%
+    step_mutate(
+        AIAcc = AIAcc %>%
+            factor(ordered = TRUE, levels = c("Highly distrust",
+                          "Highly trust",
+                          "Neither trust nor distrust",
+                          "Somewhat distrust",
+                          "Somewhat trust")) %>%
+            fct_na_value_to_level("Neither trust nor distrust")
+    ) %>%
+    step_mutate(
+        AIComplex = AIComplex %>%
+            factor(ordered = TRUE, levels = c("Very poor at handling complex tasks",
+                          "Bad at handling complex tasks",
+                          "I don't use AI tools for complex tasks / I don't know",
+                          "Neither good or bad at handling complex tasks",
+                          "Good, but not great at handling complex tasks",
+                          "Very well at handling complex tasks")) %>%
+            fct_na_value_to_level("I don't use AI tools for complex tasks / I don't know")
+    ) %>%
+    step_mutate(
+        AIAgents = AIAgents %>%
+            factor(ordered = TRUE, levels = c("No, and I don't plan to",
+                          "No, but I plan to",
+                          "No, I use AI exclusively in copilot/autocomplete mode",
+                          "Yes, I use AI agents at work daily",
+                          "Yes, I use AI agents at work monthly or infrequently",
+                          "Yes, I use AI agents at work weekly")) %>%
+            fct_na_value_to_level("No, and I don't plan to")
+    ) %>%
+    step_mutate(
+        AIAgentChange = AIAgentChange %>%
+            factor(ordered = TRUE, levels = c("Not at all or minimally",
+                          "No, but my development work has changed somewhat due to non-AI factors",
+                          "No, but my development work has significantly changed due to non-AI factors",
+                          "Yes, somewhat",
+                          "Yes, to a great extent")) %>%
+            fct_na_value_to_level("Not at all or minimally")
+    ) %>%
+    step_impute_median(JobSat)
+ordinal_recipe
+```
+
+## Numeric variables
+
+Numeric columns are simplest to replace with their medians, as we've already removed the outliers. There isn't much cleaning to do beside that
+
+```{r numeric_recipe}
+numeric_recipe <- ordinal_recipe %>%
+    step_impute_median(has_role("numeric"))
+```
+
+## Final recipe
+
+Let's remove all unused variables from the final recipe. They are potentially
+meaningful, but since we have enough variables already (>20 before encoding),
+we won't waste a lot of time trying to extract every single information point
+from likely marginally unrelated variables
+Encoding will be done on per-model basis, as different models will also
+require different preprocessing steps
+
+```{r final_recipe}
+final_recipe <- numeric_recipe %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome"))
+```
+
+# Linear regression
+
+First of all, let's check the correlation between the variables. We don't want
+collinear variables. Starting from ordinal and numeric variables, let's build
+correlation matrices
+
+The following correlation matrix eliminates a few variables:
+- Age, WorkExp and YearsCode are strongly correlated, we'll have to take one
+- SO prefixed variables (StackOverflow) are all correlated. This is probably due to value imputation, let's leave just SOVisitFreq
+- Same thing for AI related questions (except AIThreat)
+- Some encoded nominal variables are correlating, we'll remove the ones have high correlations
+
+```{r corr_ordinal, echo=FALSE}
+final_recipe %>%
+    step_rm(has_role("nominal")) %>%
+    step_ordinalscore(has_role("ordinal"), -JobSat) %>%
+    prep() %>%
+    bake(new_data = NULL) %>%
+    ggcorr()
+```
+
+```{r corr_nominal, echo=FALSE}
+final_recipe %>%
+    step_rm(-all_outcomes(), -has_role("nominal")) %>%
+    step_dummy(has_role("nominal"), one_hot = TRUE) %>%
+    prep() %>%
+    bake(new_data = NULL) %>%
+    ggcorr(hjust = 1, size = 2)
+```
+
+Let's prepare our variables for fitting the linear regression model. We'll use
+residual sum of squares, lm engine
+Removing previously mentioned variables to avoid multicollinearity.
+
+We have tried normalizing the inputs, but it doesn't make much difference since most of our features are on the scale of 0-1.
+
+The H_0 in this case is that each of the selected features does not have any relation to the predicted outcome. After fitting the model, using the tidy() function we can study each predicted coefficient and its metrics, which suggested that for some of the predictors we fail to reject the H_0. We removed these features without changing the performance of the model.
+
+```{r lr_recipe}
+lr_recipe <- final_recipe %>%
+    step_naomit(has_role("outcome")) %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+    step_rm(Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
+    step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+    step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+    step_rm("Country_United.Kingdom.of.Great.Britain.and.Northern.Ireland",
+            "EdLevel_Other",
+            "RemoteWork_Flexible",
+            "Country_Canada",
+            "DevType_BusinessAnalyst",
+            "DevType_SysAdmin",
+            "MainBranch_Adjacent",
+            "Industry_None",
+            "MainBranch_ExDeveloper",
+            "Industry_Insurance",
+            "DevType_Support",
+            "Industry_Government",
+            "EdLevel_Primary"
+    ) %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat"))
+```
+
+Splitting data. Using a simple proportion of 80/20
+```{r data_split}
+set.seed(142)
+data_split <- initial_split(data_cleaned, prop = .8)
+```
+
+```{r lr_workflow}
+lr_spec <- linear_reg(engine = "lm")
+lr_metrics <- metric_set(rmse, mae, rsq)
+
+workflow() %>%
+    add_recipe(lr_recipe) %>%
+    add_model(lr_spec) %>%
+    last_fit(data_split, metrics = lr_metrics) -> lm_fit_result
+
+lm_fit_result %>% extract_workflow() %>% tidy(conf.int = TRUE) %>%
+    arrange(p.value)
+```
+
+There are strong evidence that suggests we have to reject the H_0 for a number of features after fitting, considering the low p-values. The other metrics for the estimated coefficients are also strong, let's see the metrics of the model.
+
+```{r lr_metrics}
+lm_fit_result %>% collect_metrics()
+```
+
+R^2 is around 52%, RMSE is 42k and MAE is 31k. These are the best statistics we were able to achieve using linear regression using different data cleaning techniques. Let's inspect scatter plot that shows us how the errors are distributed across true outcome values.
+
+```{r lr_plot1,echo=FALSE}
+lm_fit_result %>%
+    collect_predictions() %>%
+    ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
+    geom_point(alpha = 0.3, color = "gray50") +
+    geom_abline(lty = 2, color = "red3") + # The "perfect prediction" line
+    coord_obs_pred() +                   # Standardizes the axes for regression
+    labs(title = "Predicted vs. Truth",
+         subtitle = "Linear Regression Performance") +
+    theme_minimal()
+```
+
+The relationship might be non-linear, so let's check the residual plot to rule that out. The predicted blue line is very close to the y axis, so changing the relationship might not improve the performance.
+
+```{r lr_plot2,echo=FALSE}
+lm_fit_result %>%
+    collect_predictions() %>%
+    mutate(.resid = ConvertedCompYearly - .pred) %>%
+    ggplot(aes(x = .pred, y = .resid)) +
+    geom_point(alpha = 0.4, color = "gray50") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+    geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+    labs(
+        title = "Residual vs. Fitted Plot",
+        subtitle = "Checking for homoscedasticity and linearity",
+        x = "Predicted Values",
+        y = "Residuals"
+    ) +
+    theme_minimal()
+```
+
+
+# Random forest
+
+The next model we've chosen is random forest. We have a lot of rows to train
+on, a lot of variables and noise, so we'll use random forest rather than a
+decision tree.
+
+The random forest works better with categorical values than linear regression, since it doesn't need them encoded in multiple values. Let's prepare the recipe for our model fitting and evaluation.
+
+```{r rf_recipe}
+rf_recipe <- final_recipe %>%
+    step_naomit(has_role("outcome")) %>%
+    #step_log(all_outcomes()) %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+    #step_rm(Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
+    #step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+    #step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
+    step_integer(has_role("nominal"))
+```
+
+The best hyperparameters we can find are the following: 2000 trees, 10 random variables are selected (from ~25), minimum 2 data points in a node. We selected MSE, MAE, MAPE and RMSE as our metrics.
+
+```{r rf_workflow}
+rf_spec <- rand_forest(
+    mode = "regression",
+    engine = "ranger",
+    trees = 2000,
+    mtry = 10,
+    min_n = 2)
+
+rf_metrics <- metric_set(mse, mae, mape, rmse)
+
+workflow() %>%
+    add_recipe(rf_recipe) %>%
+    add_model(rf_spec) %>%
+    last_fit(data_split, metrics = rf_metrics) -> rf_fit_result
+
+rf_fit_result %>%
+    collect_metrics()
+```
+
+Unfortunately, the metrics are very disappointing. The model completely fails to capture the relationship between predictors and the outcome, producing absurd metrics. The model just fits the distribution's mean, as seen on the plot below.
+
+```{r rf_plot,echo=FALSE}
+rf_fit_result %>%
+    collect_predictions() %>%
+    ggplot() +
+    geom_density(aes(x = ConvertedCompYearly, fill = "Actual"), alpha = 0.4) +
+    geom_density(aes(x = .pred, fill = "Predicted"), alpha = 0.4) +
+    scale_fill_manual(values = c("Actual" = "black", "Predicted" = "blue")) +
+    theme_minimal() +
+    labs(title = "Distribution of Actual vs. Predicted Values")
+```
+
+Hyperparameter tuning, change in encoding, different predictors all produce the same results. Random forest does not capture the variance of the outcome variable.
+
+

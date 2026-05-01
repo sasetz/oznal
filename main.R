@@ -934,7 +934,7 @@ ggplot(top_15, aes(x = Importance, y = Variable, fill = Importance > 0)) +
   theme_minimal()
 
 
-#---- 2 scenario ----
+#---- 3 scenario ----
 
 #-----Forward ----
 
