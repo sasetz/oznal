@@ -1212,7 +1212,7 @@ server <- function(input, output, session) {
     })
 
     output$model_lr_tidy <- renderTable(striped = TRUE,
-        lr_model()$tidy)
+        lr_model()$tidy %>% arrange(desc(estimate)))
     output$model_lr_summary <- renderTable(striped = TRUE,
         make_summary(lr_model()$metrics, lr_model()$n_predictors))
 
