@@ -15,6 +15,7 @@ library(GGally)
 library(tidymodels)
 library(ggridges)
 library(plotly)
+library(LiblineaR)
 
 #---- 1. Preliminaries ----
 
@@ -411,6 +412,55 @@ rf_workflow <-
     workflow() %>%
     add_recipe(rf_recipe) %>%
     add_model(rf_spec)
+rf_removed_vars <- c(
+    "Industry_Higher.Education",
+    "MainBranch_Occasional",
+    "Country_United.Kingdom.of.Great.Britain.and.Northern.Ireland",
+    "EdLevel_Other",
+    "RemoteWork_Flexible",
+    "Country_Canada",
+    "DevType_BusinessAnalyst",
+    "DevType_SysAdmin",
+    "MainBranch_Adjacent",
+    "Industry_None",
+    "MainBranch_ExDeveloper",
+    "Industry_Insurance",
+    "DevType_Support",
+    "Industry_Government",
+    "EdLevel_Primary",
+    "Age",
+    "YearsCode"
+)
+rf_removed_prefixes <- c("SO", "AI")
+
+svm_recipe <- final_recipe %>%
+    step_naomit(has_role("outcome")) %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+    step_rm(Age, YearsCode) %>%
+    step_dummy(has_role("nominal"), one_hot = TRUE) %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat"))
+svm_metrics <- metric_set(rmse, mae, rsq)
+
+forward_recipe <- final_recipe %>%
+    step_naomit(has_role("outcome")) %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+    step_rm(Age, YearsCode) %>%
+    step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+    step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat"))
+forward_metrics <- metric_set(rmse, mae, rsq)
+
+lasso_recipe <- final_recipe %>%
+    step_naomit(has_role("outcome")) %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+    step_rm(Age, YearsCode) %>%
+    step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+    step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat"))
+lasso_metrics <- metric_set(rmse, mae, rsq)
+
+ridge_recipe <- lasso_recipe
+ridge_metrics <- metric_set(rmse, mae, rsq)
 #---- 6. Pages ----
 
 distributions_page <-
@@ -473,9 +523,124 @@ lr_page <-
                   mainPanel(
                       plotlyOutput("model_lr_residual"),
                       plotlyOutput("model_lr_plot"),
-                      tableOutput("model_lr_metrics"),
+                          tableOutput("model_lr_summary"),
                       tableOutput("model_lr_tidy")
                       ),
+              ))
+
+rf_page <-
+    nav_panel("Random Forest",
+              sidebarLayout(
+                  sidebarPanel(
+                      checkboxInput("rf_log", "Log scale outcome", value = FALSE),
+                      selectizeInput(
+                          "rf_variables",
+                          "Predictors",
+                          choices = NULL,
+                          selected = NULL,
+                          multiple = TRUE,
+                          options = list(plugins = list("remove_button"))
+                      ),
+                      sliderInput("rf_trees", "Trees", min = 200, max = 6000, value = 2000, step = 200),
+                      sliderInput("rf_mtry", "mtry", min = 1, max = 20, value = 10, step = 1),
+                      sliderInput("rf_min_n", "min_n", min = 1, max = 20, value = 2, step = 1)
+                  ),
+                  mainPanel(
+                      plotlyOutput("model_rf_density"),
+                      plotlyOutput("model_rf_plot"),
+                      tableOutput("model_rf_summary")
+                  )
+              ))
+
+svm_page <-
+    nav_panel("SVM",
+              sidebarLayout(
+                  sidebarPanel(
+                      checkboxInput("svm_log", "Log scale outcome", value = TRUE),
+                      checkboxInput("svm_normalize", "Normalize numeric predictors", value = TRUE),
+                      checkboxInput("svm_drop_corr", "Drop correlated predictors", value = TRUE),
+                      conditionalPanel(
+                          condition = "input.svm_drop_corr == true",
+                          sliderInput("svm_corr_threshold", "Correlation threshold",
+                                      min = 0.5, max = 0.95, value = 0.7, step = 0.05)
+                      ),
+                      numericInput("svm_cost", "Cost", value = 10, min = 0.01, step = 0.5),
+                      numericInput("svm_margin", "Margin", value = 0.01, min = 0.001, step = 0.01)
+                  ),
+                  mainPanel(
+                      plotlyOutput("model_svm_residual"),
+                      plotlyOutput("model_svm_plot"),
+                      tableOutput("model_svm_summary")
+                  )
+              ))
+
+forward_page <-
+    nav_panel("Forward Selection",
+              sidebarLayout(
+                  sidebarPanel(
+                      checkboxInput("forward_log", "Log scale outcome", value = TRUE),
+                      checkboxInput("forward_normalize", "Normalize numeric predictors", value = TRUE),
+                      checkboxInput("forward_drop_corr", "Drop correlated predictors", value = TRUE),
+                      conditionalPanel(
+                          condition = "input.forward_drop_corr == true",
+                          sliderInput("forward_corr_threshold", "Correlation threshold",
+                                      min = 0.5, max = 0.95, value = 0.7, step = 0.05)
+                      ),
+                      selectInput("forward_criterion", "Selection criterion",
+                                  list("AIC" = "aic", "BIC" = "bic", "Custom k" = "custom")),
+                      conditionalPanel(
+                          condition = "input.forward_criterion == 'custom'",
+                          numericInput("forward_k", "Custom k", value = 2, min = 0.1, step = 0.1)
+                      )
+                  ),
+                  mainPanel(
+                      plotlyOutput("model_forward_residual"),
+                      plotlyOutput("model_forward_plot"),
+                      tableOutput("model_forward_summary"),
+                      tableOutput("model_forward_tidy")
+                  )
+              ))
+
+lasso_page <-
+    nav_panel("Lasso",
+              sidebarLayout(
+                  sidebarPanel(
+                      checkboxInput("lasso_log", "Log scale outcome", value = TRUE),
+                      checkboxInput("lasso_normalize", "Normalize numeric predictors", value = TRUE),
+                      checkboxInput("lasso_drop_corr", "Drop correlated predictors", value = TRUE),
+                      conditionalPanel(
+                          condition = "input.lasso_drop_corr == true",
+                          sliderInput("lasso_corr_threshold", "Correlation threshold",
+                                      min = 0.5, max = 0.95, value = 0.7, step = 0.05)
+                      ),
+                      numericInput("lasso_penalty", "Penalty", value = 0.01, min = 0.0001, step = 0.001)
+                  ),
+                  mainPanel(
+                      plotlyOutput("model_lasso_residual"),
+                      plotlyOutput("model_lasso_plot"),
+                      tableOutput("model_lasso_summary")
+                  )
+              ))
+
+ridge_page <-
+    nav_panel("Ridge",
+              sidebarLayout(
+                  sidebarPanel(
+                      checkboxInput("ridge_log", "Log scale outcome", value = TRUE),
+                      checkboxInput("ridge_normalize", "Normalize numeric predictors", value = TRUE),
+                      checkboxInput("ridge_drop_corr", "Drop correlated predictors", value = TRUE),
+                      conditionalPanel(
+                          condition = "input.ridge_drop_corr == true",
+                          sliderInput("ridge_corr_threshold", "Correlation threshold",
+                                      min = 0.5, max = 0.95, value = 0.7, step = 0.05)
+                      ),
+                      numericInput("ridge_penalty", "Penalty", value = 0.01, min = 0.0001, step = 0.001)
+                  ),
+                  mainPanel(
+                      plotlyOutput("model_ridge_residual"),
+                      plotlyOutput("model_ridge_plot"),
+                      tableOutput("model_ridge_summary")
+                  )
               ))
 
 
@@ -493,7 +658,12 @@ ui <- page_navbar(
         "Models",
         navset_pill_list(
             widths = c(2, 10),
-            lr_page
+            lr_page,
+            rf_page,
+            svm_page,
+            forward_page,
+            lasso_page,
+            ridge_page
         )), 
     nav_panel("Take the survey", "Page C content"), 
     title = "Elements of AI, Anna Pylypenko & Kirill Putiatin", 
@@ -502,6 +672,14 @@ ui <- page_navbar(
 
 #---- 8. Server ----
 server <- function(input, output, session) {
+    make_summary <- function(metrics, n_predictors) {
+        metrics %>%
+            select(.metric, .estimate) %>%
+            filter(.metric %in% c("rmse", "mae", "rsq", "mape", "mse")) %>%
+            pivot_wider(names_from = .metric, values_from = .estimate) %>%
+            mutate(predictors = n_predictors) %>%
+            select(predictors, everything())
+    }
     lr_recipe_dynamic <- reactive({
         rec <- lr_recipe
         if (isTRUE(input$lr_log)) {
@@ -570,7 +748,8 @@ server <- function(input, output, session) {
             fit = fit,
             preds = preds,
             metrics = metrics,
-            tidy = tidy(fit)
+            tidy = tidy(fit),
+            n_predictors = length(input$lr_variables)
         )
     })
     output$data_histogram <- renderPlotly({
@@ -611,6 +790,289 @@ server <- function(input, output, session) {
             ggcorr(corr_data[[input$data_correlation]], hjust = 2, size = 2)
         )
     })
+
+    rf_recipe_dynamic <- reactive({
+        rec <- rf_recipe
+        if (isTRUE(input$rf_log)) {
+            rec <- rec %>% step_log(all_outcomes(), base = 10)
+        }
+        rec
+    })
+    rf_baked <- reactive({
+        prepped <- rf_recipe_dynamic() %>% prep(training = training(data_split))
+        list(
+            prepped = prepped,
+            train = bake(prepped, new_data = training(data_split)),
+            test = bake(prepped, new_data = testing(data_split))
+        )
+    })
+    rf_predictors <- reactive({
+        rf_baked()$train %>%
+            select(-ConvertedCompYearly) %>%
+            colnames()
+    })
+    rf_default_vars <- reactive({
+        vars <- rf_predictors()
+        vars <- vars[!vars %in% rf_removed_vars]
+        vars <- vars[!str_detect(vars, paste0("^(", paste(rf_removed_prefixes, collapse = "|"), ")"))]
+        vars
+    })
+    observeEvent(rf_predictors(), {
+        selected <- if (is.null(input$rf_variables) || length(input$rf_variables) == 0) {
+            rf_default_vars()
+        } else {
+            intersect(input$rf_variables, rf_predictors())
+        }
+        if (length(selected) == 0) {
+            selected <- rf_default_vars()
+        }
+        updateSelectizeInput(
+            session,
+            "rf_variables",
+            choices = rf_predictors(),
+            selected = selected
+        )
+        updateSliderInput(
+            session,
+            "rf_mtry",
+            min = 1,
+            max = max(1, length(rf_predictors())),
+            value = min(input$rf_mtry %||% 10, length(rf_predictors()))
+        )
+    })
+    rf_model <- reactive({
+        req(input$rf_variables)
+        req(length(input$rf_variables) > 0)
+        print("Calculating Random Forest...")
+        baked <- rf_baked()
+        train_data <- baked$train %>%
+            select(all_of(c("ConvertedCompYearly", input$rf_variables)))
+        test_data <- baked$test %>%
+            select(all_of(c("ConvertedCompYearly", input$rf_variables)))
+        rf_spec_dyn <- rand_forest(
+            mode = "regression",
+            engine = "ranger",
+            trees = input$rf_trees,
+            mtry = input$rf_mtry,
+            min_n = input$rf_min_n
+        )
+        rf_formula <- as.formula(
+            paste("ConvertedCompYearly ~", paste(input$rf_variables, collapse = " + "))
+        )
+        fit <- rf_spec_dyn %>% fit(rf_formula, data = train_data)
+        preds <- predict(fit, new_data = test_data) %>%
+            bind_cols(test_data %>% select(ConvertedCompYearly))
+        metrics <- rf_metrics(preds, truth = ConvertedCompYearly, estimate = .pred)
+        list(
+            fit = fit,
+            preds = preds,
+            metrics = metrics,
+            n_predictors = length(input$rf_variables)
+        )
+    })
+
+    svm_recipe_dynamic <- reactive({
+        rec <- svm_recipe
+        if (isTRUE(input$svm_log)) {
+            rec <- rec %>% step_log(all_outcomes(), base = 10)
+        }
+        if (isTRUE(input$svm_drop_corr)) {
+            rec <- rec %>% step_corr(all_numeric_predictors(), threshold = input$svm_corr_threshold)
+        }
+        if (isTRUE(input$svm_normalize)) {
+            rec <- rec %>% step_normalize(all_numeric_predictors())
+        }
+        rec
+    })
+    svm_baked <- reactive({
+        prepped <- svm_recipe_dynamic() %>% prep(training = training(data_split))
+        list(
+            prepped = prepped,
+            train = bake(prepped, new_data = training(data_split)),
+            test = bake(prepped, new_data = testing(data_split))
+        )
+    })
+    svm_model <- reactive({
+        print("Calculating SVM...")
+        baked <- svm_baked()
+        predictors <- baked$train %>%
+            select(-ConvertedCompYearly) %>%
+            colnames()
+        svm_formula <- as.formula(
+            paste("ConvertedCompYearly ~", paste(predictors, collapse = " + "))
+        )
+        svm_spec <- svm_linear(
+            cost = input$svm_cost,
+            margin = input$svm_margin
+        ) %>%
+            set_engine("LiblineaR") %>%
+            set_mode("regression")
+        fit <- svm_spec %>% fit(svm_formula, data = baked$train)
+        preds <- predict(fit, new_data = baked$test) %>%
+            bind_cols(baked$test %>% select(ConvertedCompYearly))
+        metrics <- svm_metrics(preds, truth = ConvertedCompYearly, estimate = .pred)
+        list(
+            fit = fit,
+            preds = preds,
+            metrics = metrics,
+            n_predictors = length(predictors)
+        )
+    })
+
+    forward_recipe_dynamic <- reactive({
+        rec <- forward_recipe
+        if (isTRUE(input$forward_log)) {
+            rec <- rec %>% step_log(all_outcomes(), base = 10)
+        }
+        if (isTRUE(input$forward_drop_corr)) {
+            rec <- rec %>% step_corr(all_numeric_predictors(), threshold = input$forward_corr_threshold)
+        }
+        if (isTRUE(input$forward_normalize)) {
+            rec <- rec %>% step_normalize(all_numeric_predictors())
+        }
+        rec
+    })
+    forward_baked <- reactive({
+        prepped <- forward_recipe_dynamic() %>% prep(training = training(data_split))
+        list(
+            prepped = prepped,
+            train = bake(prepped, new_data = training(data_split)),
+            test = bake(prepped, new_data = testing(data_split))
+        )
+    })
+    forward_model <- reactive({
+        print("Calculating Forward Selection...")
+        baked <- forward_baked()
+        predictors <- baked$train %>%
+            select(-ConvertedCompYearly) %>%
+            colnames()
+        full_formula <- as.formula(
+            paste("ConvertedCompYearly ~", paste(predictors, collapse = " + "))
+        )
+        null_model <- lm(ConvertedCompYearly ~ 1, data = baked$train)
+        full_model <- lm(full_formula, data = baked$train)
+        k <- case_when(
+            input$forward_criterion == "bic" ~ log(nrow(baked$train)),
+            input$forward_criterion == "custom" ~ max(input$forward_k, 0.1),
+            TRUE ~ 2
+        )
+        step_model <- stats::step(
+            null_model,
+            k = k,
+            direction = "forward",
+            scope = list(lower = null_model, upper = full_model),
+            trace = 0
+        )
+        preds <- predict(step_model, newdata = baked$test)
+        preds_df <- tibble(
+            ConvertedCompYearly = baked$test$ConvertedCompYearly,
+            .pred = preds
+        )
+        metrics <- forward_metrics(preds_df, truth = ConvertedCompYearly, estimate = .pred)
+        list(
+            fit = step_model,
+            preds = preds_df,
+            metrics = metrics,
+            tidy = tidy(step_model),
+            n_predictors = length(coef(step_model)) - 1
+        )
+    })
+
+    lasso_recipe_dynamic <- reactive({
+        rec <- lasso_recipe
+        if (isTRUE(input$lasso_log)) {
+            rec <- rec %>% step_log(all_outcomes(), base = 10)
+        }
+        if (isTRUE(input$lasso_drop_corr)) {
+            rec <- rec %>% step_corr(all_numeric_predictors(), threshold = input$lasso_corr_threshold)
+        }
+        if (isTRUE(input$lasso_normalize)) {
+            rec <- rec %>% step_normalize(all_numeric_predictors())
+        }
+        rec
+    })
+    lasso_baked <- reactive({
+        prepped <- lasso_recipe_dynamic() %>% prep(training = training(data_split))
+        list(
+            prepped = prepped,
+            train = bake(prepped, new_data = training(data_split)),
+            test = bake(prepped, new_data = testing(data_split))
+        )
+    })
+    lasso_model <- reactive({
+        print("Calculating Lasso...")
+        baked <- lasso_baked()
+        predictors <- baked$train %>%
+            select(-ConvertedCompYearly) %>%
+            colnames()
+        lasso_formula <- as.formula(
+            paste("ConvertedCompYearly ~", paste(predictors, collapse = " + "))
+        )
+        lasso_spec <- linear_reg(
+            penalty = input$lasso_penalty,
+            mixture = 1
+        ) %>%
+            set_engine("glmnet") %>%
+            set_mode("regression")
+        fit <- lasso_spec %>% fit(lasso_formula, data = baked$train)
+        preds <- predict(fit, new_data = baked$test) %>%
+            bind_cols(baked$test %>% select(ConvertedCompYearly))
+        metrics <- lasso_metrics(preds, truth = ConvertedCompYearly, estimate = .pred)
+        list(
+            fit = fit,
+            preds = preds,
+            metrics = metrics,
+            n_predictors = length(predictors)
+        )
+    })
+
+    ridge_recipe_dynamic <- reactive({
+        rec <- ridge_recipe
+        if (isTRUE(input$ridge_log)) {
+            rec <- rec %>% step_log(all_outcomes(), base = 10)
+        }
+        if (isTRUE(input$ridge_drop_corr)) {
+            rec <- rec %>% step_corr(all_numeric_predictors(), threshold = input$ridge_corr_threshold)
+        }
+        if (isTRUE(input$ridge_normalize)) {
+            rec <- rec %>% step_normalize(all_numeric_predictors())
+        }
+        rec
+    })
+    ridge_baked <- reactive({
+        prepped <- ridge_recipe_dynamic() %>% prep(training = training(data_split))
+        list(
+            prepped = prepped,
+            train = bake(prepped, new_data = training(data_split)),
+            test = bake(prepped, new_data = testing(data_split))
+        )
+    })
+    ridge_model <- reactive({
+        print("Calculating Ridge...")
+        baked <- ridge_baked()
+        predictors <- baked$train %>%
+            select(-ConvertedCompYearly) %>%
+            colnames()
+        ridge_formula <- as.formula(
+            paste("ConvertedCompYearly ~", paste(predictors, collapse = " + "))
+        )
+        ridge_spec <- linear_reg(
+            penalty = input$ridge_penalty,
+            mixture = 0
+        ) %>%
+            set_engine("glmnet") %>%
+            set_mode("regression")
+        fit <- ridge_spec %>% fit(ridge_formula, data = baked$train)
+        preds <- predict(fit, new_data = baked$test) %>%
+            bind_cols(baked$test %>% select(ConvertedCompYearly))
+        metrics <- ridge_metrics(preds, truth = ConvertedCompYearly, estimate = .pred)
+        list(
+            fit = fit,
+            preds = preds,
+            metrics = metrics,
+            n_predictors = length(predictors)
+        )
+    })
     
     output$model_lr_plot <- renderPlotly({
            req(lr_model())
@@ -647,8 +1109,190 @@ server <- function(input, output, session) {
 
     output$model_lr_tidy <- renderTable(striped = TRUE,
         lr_model()$tidy)
-    output$model_lr_metrics <- renderTable(striped = TRUE,
-                                        lr_model()$metrics)
+    output$model_lr_summary <- renderTable(striped = TRUE,
+        make_summary(lr_model()$metrics, lr_model()$n_predictors))
+
+    output$model_rf_plot <- renderPlotly({
+        req(rf_model())
+        ggplotly(
+            rf_model()$preds %>%
+                ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
+                geom_point(alpha = 0.3, color = "gray50") +
+                geom_abline(lty = 2, color = "red3") +
+                coord_obs_pred() +
+                labs(title = "Predicted vs. Truth",
+                     subtitle = "Random Forest Performance") +
+                theme_minimal()
+        )
+    })
+
+    output$model_rf_density <- renderPlotly({
+        req(rf_model())
+        ggplotly(
+            rf_model()$preds %>%
+                ggplot() +
+                geom_density(aes(x = ConvertedCompYearly, fill = "Actual"), alpha = 0.4) +
+                geom_density(aes(x = .pred, fill = "Predicted"), alpha = 0.4) +
+                scale_fill_manual(values = c("Actual" = "black", "Predicted" = "blue")) +
+                theme_minimal() +
+                labs(title = "Distribution of Actual vs. Predicted Values")
+        )
+    })
+
+    output$model_rf_summary <- renderTable(striped = TRUE,
+                                           make_summary(rf_model()$metrics, rf_model()$n_predictors))
+
+    output$model_svm_plot <- renderPlotly({
+        req(svm_model())
+        ggplotly(
+            svm_model()$preds %>%
+                ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
+                geom_abline(lty = 2, color = "red3") +
+                geom_point(alpha = 0.1, color = "gray50") +
+                labs(title = "Actual vs Predicted ConvertedCompYearly SVM",
+                     x = "Actual",
+                     y = "Predicted") +
+                theme_minimal()
+        )
+    })
+
+    output$model_svm_residual <- renderPlotly({
+        req(svm_model())
+        ggplotly(
+            svm_model()$preds %>%
+                mutate(.resid = ConvertedCompYearly - .pred) %>%
+                ggplot(aes(x = .pred, y = .resid)) +
+                geom_point(alpha = 0.4, color = "gray50") +
+                geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+                geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+                labs(
+                    title = "Residual vs. Fitted Plot SVM",
+                    subtitle = "Checking for homoscedasticity and linearity",
+                    x = "Predicted Values",
+                    y = "Residuals"
+                ) +
+                theme_minimal()
+        )
+    })
+
+    output$model_svm_summary <- renderTable(striped = TRUE,
+                                            make_summary(svm_model()$metrics, svm_model()$n_predictors))
+
+    output$model_forward_plot <- renderPlotly({
+        req(forward_model())
+        ggplotly(
+            forward_model()$preds %>%
+                ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
+                geom_abline(intercept = 0, slope = 1, lty = 2, color = "red3", linewidth = 0.8) +
+                geom_point(alpha = 0.1, color = "midnightblue") +
+                labs(
+                    title = "Actual vs Predicted Salary (Forward Selection)",
+                    x = "Actual",
+                    y = "Predicted"
+                ) +
+                theme_minimal()
+        )
+    })
+
+    output$model_forward_residual <- renderPlotly({
+        req(forward_model())
+        ggplotly(
+            forward_model()$preds %>%
+                mutate(.resid = ConvertedCompYearly - .pred) %>%
+                ggplot(aes(x = .pred, y = .resid)) +
+                geom_point(alpha = 0.4, color = "gray50") +
+                geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+                geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+                labs(
+                    title = "Residual vs. Fitted Plot Forward Selection",
+                    subtitle = "Checking for homoscedasticity and linearity",
+                    x = "Predicted Values",
+                    y = "Residuals"
+                ) +
+                theme_minimal()
+        )
+    })
+
+    output$model_forward_tidy <- renderTable(striped = TRUE,
+                                             forward_model()$tidy)
+    output$model_forward_summary <- renderTable(striped = TRUE,
+                                                make_summary(forward_model()$metrics, forward_model()$n_predictors))
+
+    output$model_lasso_plot <- renderPlotly({
+        req(lasso_model())
+        ggplotly(
+            lasso_model()$preds %>%
+                ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
+                geom_abline(intercept = 0, slope = 1, lty = 2, color = "red3", linewidth = 0.8) +
+                geom_point(alpha = 0.2, color = "darkgreen") +
+                labs(
+                    title = "Actual vs Predicted Salary (Lasso Regression)",
+                    x = "Actual",
+                    y = "Predicted"
+                ) +
+                theme_minimal()
+        )
+    })
+
+    output$model_lasso_residual <- renderPlotly({
+        req(lasso_model())
+        ggplotly(
+            lasso_model()$preds %>%
+                mutate(.resid = ConvertedCompYearly - .pred) %>%
+                ggplot(aes(x = .pred, y = .resid)) +
+                geom_point(alpha = 0.4, color = "gray50") +
+                geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+                geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+                labs(
+                    title = "Residual vs. Fitted Plot Lasso",
+                    subtitle = "Checking for homoscedasticity and linearity",
+                    x = "Predicted Values",
+                    y = "Residuals"
+                ) +
+                theme_minimal()
+        )
+    })
+
+    output$model_lasso_summary <- renderTable(striped = TRUE,
+                                              make_summary(lasso_model()$metrics, lasso_model()$n_predictors))
+
+    output$model_ridge_plot <- renderPlotly({
+        req(ridge_model())
+        ggplotly(
+            ridge_model()$preds %>%
+                ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
+                geom_abline(intercept = 0, slope = 1, lty = 2, color = "red3", linewidth = 0.8) +
+                geom_point(alpha = 0.2, color = "darkgreen") +
+                labs(
+                    title = "Actual vs Predicted Salary (Ridge Regression)",
+                    x = "Actual",
+                    y = "Predicted"
+                ) +
+                theme_minimal()
+        )
+    })
+
+    output$model_ridge_residual <- renderPlotly({
+        req(ridge_model())
+        ggplotly(
+            ridge_model()$preds %>%
+                mutate(.resid = ConvertedCompYearly - .pred) %>%
+                ggplot(aes(x = .pred, y = .resid)) +
+                geom_point(alpha = 0.4, color = "gray50") +
+                geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+                geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+                labs(
+                    title = "Residual vs. Fitted Plot Ridge",
+                    subtitle = "Checking for homoscedasticity and linearity",
+                    x = "Predicted Values",
+                    y = "Residuals"
+                ) +
+                theme_minimal()
+        )
+    })
+
+    output$model_ridge_summary <- renderTable(striped = TRUE,
+                                              make_summary(ridge_model()$metrics, ridge_model()$n_predictors))
 }
 
 shinyApp(ui = ui, server = server)
