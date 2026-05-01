@@ -31,6 +31,40 @@ data <- data %>%
     filter(Employment != 'Retired',
            Employment != 'Not employed',
            Employment != 'I prefer not to say' )
+
+models_dir <- file.path("output", "models")
+model_cache <- list(
+    lr = if (file.exists(file.path(models_dir, "lr_default.rds"))) {
+        readRDS(file.path(models_dir, "lr_default.rds"))
+    } else {
+        NULL
+    },
+    rf = if (file.exists(file.path(models_dir, "rf_default.rds"))) {
+        readRDS(file.path(models_dir, "rf_default.rds"))
+    } else {
+        NULL
+    },
+    svm = if (file.exists(file.path(models_dir, "svm_default.rds"))) {
+        readRDS(file.path(models_dir, "svm_default.rds"))
+    } else {
+        NULL
+    },
+    forward = if (file.exists(file.path(models_dir, "forward_default.rds"))) {
+        readRDS(file.path(models_dir, "forward_default.rds"))
+    } else {
+        NULL
+    },
+    lasso = if (file.exists(file.path(models_dir, "lasso_default.rds"))) {
+        readRDS(file.path(models_dir, "lasso_default.rds"))
+    } else {
+        NULL
+    },
+    ridge = if (file.exists(file.path(models_dir, "ridge_default.rds"))) {
+        readRDS(file.path(models_dir, "ridge_default.rds"))
+    } else {
+        NULL
+    }
+)
 #---- 2. Plot definitions ----
 
 bar_plot <- function(x, name) {
@@ -541,9 +575,9 @@ rf_page <-
                           multiple = TRUE,
                           options = list(plugins = list("remove_button"))
                       ),
-                      sliderInput("rf_trees", "Trees", min = 200, max = 6000, value = 2000, step = 200),
+                      sliderInput("rf_trees", "Trees", min = 200, max = 6000, value = 6000, step = 200),
                       sliderInput("rf_mtry", "mtry", min = 1, max = 20, value = 10, step = 1),
-                      sliderInput("rf_min_n", "min_n", min = 1, max = 20, value = 2, step = 1)
+                      sliderInput("rf_min_n", "min_n", min = 1, max = 20, value = 7, step = 1)
                   ),
                   mainPanel(
                       plotlyOutput("model_rf_density"),
@@ -587,7 +621,8 @@ forward_page <-
                                       min = 0.5, max = 0.95, value = 0.7, step = 0.05)
                       ),
                       selectInput("forward_criterion", "Selection criterion",
-                                  list("AIC" = "aic", "BIC" = "bic", "Custom k" = "custom")),
+                                  list("AIC" = "aic", "BIC" = "bic", "Custom k" = "custom"),
+                                  selected = "bic"),
                       conditionalPanel(
                           condition = "input.forward_criterion == 'custom'",
                           numericInput("forward_k", "Custom k", value = 2, min = 0.1, step = 0.1)
@@ -672,6 +707,21 @@ ui <- page_navbar(
 
 #---- 8. Server ----
 server <- function(input, output, session) {
+    get_cached_model <- function(key, config) {
+        cache <- model_cache[[key]]
+        if (is.null(cache)) return(NULL)
+        cache_config <- if (!is.null(cache$config)) cache$config else list()
+        if (!isTRUE(all.equal(cache_config, config))) return(NULL)
+        model_obj <- if (!is.null(cache$model)) {
+            cache$model
+        } else if (!is.null(cache$fit)) {
+            cache$fit
+        } else {
+            NULL
+        }
+        if (is.null(model_obj)) return(NULL)
+        list(model = model_obj, config = cache_config)
+    }
     make_summary <- function(metrics, n_predictors) {
         metrics %>%
             select(.metric, .estimate) %>%
@@ -731,6 +781,13 @@ server <- function(input, output, session) {
     lr_model <- reactive({
         req(input$lr_variables)
         req(length(input$lr_variables) > 0)
+        lr_config <- list(
+            log_outcome = isTRUE(input$lr_log),
+            normalize = isTRUE(input$lr_normalize),
+            drop_corr = isTRUE(input$lr_drop_corr),
+            corr_threshold = input$lr_corr_threshold,
+            predictors = input$lr_variables
+        )
         print("Calculating Linear Regression...")
         baked <- lr_baked()
         train_data <- baked$train %>%
@@ -740,7 +797,8 @@ server <- function(input, output, session) {
         lr_formula <- as.formula(
             paste("ConvertedCompYearly ~", paste(input$lr_variables, collapse = " + "))
         )
-        fit <- lr_spec %>% fit(lr_formula, data = train_data)
+        lr_cached <- get_cached_model("lr", lr_config)
+        fit <- if (!is.null(lr_cached)) lr_cached$model else lr_spec %>% fit(lr_formula, data = train_data)
         preds <- predict(fit, new_data = test_data) %>%
             bind_cols(test_data %>% select(ConvertedCompYearly))
         metrics <- lr_metrics(preds, truth = ConvertedCompYearly, estimate = .pred)
@@ -843,6 +901,13 @@ server <- function(input, output, session) {
     rf_model <- reactive({
         req(input$rf_variables)
         req(length(input$rf_variables) > 0)
+        rf_config <- list(
+            log_outcome = isTRUE(input$rf_log),
+            trees = input$rf_trees,
+            mtry = input$rf_mtry,
+            min_n = input$rf_min_n,
+            predictors = input$rf_variables
+        )
         print("Calculating Random Forest...")
         baked <- rf_baked()
         train_data <- baked$train %>%
@@ -859,7 +924,8 @@ server <- function(input, output, session) {
         rf_formula <- as.formula(
             paste("ConvertedCompYearly ~", paste(input$rf_variables, collapse = " + "))
         )
-        fit <- rf_spec_dyn %>% fit(rf_formula, data = train_data)
+        rf_cached <- get_cached_model("rf", rf_config)
+        fit <- if (!is.null(rf_cached)) rf_cached$model else rf_spec_dyn %>% fit(rf_formula, data = train_data)
         preds <- predict(fit, new_data = test_data) %>%
             bind_cols(test_data %>% select(ConvertedCompYearly))
         metrics <- rf_metrics(preds, truth = ConvertedCompYearly, estimate = .pred)
@@ -893,6 +959,14 @@ server <- function(input, output, session) {
         )
     })
     svm_model <- reactive({
+        svm_config <- list(
+            log_outcome = isTRUE(input$svm_log),
+            normalize = isTRUE(input$svm_normalize),
+            drop_corr = isTRUE(input$svm_drop_corr),
+            corr_threshold = input$svm_corr_threshold,
+            cost = input$svm_cost,
+            margin = input$svm_margin
+        )
         print("Calculating SVM...")
         baked <- svm_baked()
         predictors <- baked$train %>%
@@ -907,7 +981,8 @@ server <- function(input, output, session) {
         ) %>%
             set_engine("LiblineaR") %>%
             set_mode("regression")
-        fit <- svm_spec %>% fit(svm_formula, data = baked$train)
+        svm_cached <- get_cached_model("svm", svm_config)
+        fit <- if (!is.null(svm_cached)) svm_cached$model else svm_spec %>% fit(svm_formula, data = baked$train)
         preds <- predict(fit, new_data = baked$test) %>%
             bind_cols(baked$test %>% select(ConvertedCompYearly))
         metrics <- svm_metrics(preds, truth = ConvertedCompYearly, estimate = .pred)
@@ -941,8 +1016,22 @@ server <- function(input, output, session) {
         )
     })
     forward_model <- reactive({
+        forward_baked <- forward_baked()
+        k <- case_when(
+            input$forward_criterion == "bic" ~ log(nrow(forward_baked$train)),
+            input$forward_criterion == "custom" ~ max(input$forward_k, 0.1),
+            TRUE ~ 2
+        )
+        forward_config <- list(
+            log_outcome = isTRUE(input$forward_log),
+            normalize = isTRUE(input$forward_normalize),
+            drop_corr = isTRUE(input$forward_drop_corr),
+            corr_threshold = input$forward_corr_threshold,
+            criterion = input$forward_criterion,
+            k = k
+        )
         print("Calculating Forward Selection...")
-        baked <- forward_baked()
+        baked <- forward_baked
         predictors <- baked$train %>%
             select(-ConvertedCompYearly) %>%
             colnames()
@@ -951,18 +1040,18 @@ server <- function(input, output, session) {
         )
         null_model <- lm(ConvertedCompYearly ~ 1, data = baked$train)
         full_model <- lm(full_formula, data = baked$train)
-        k <- case_when(
-            input$forward_criterion == "bic" ~ log(nrow(baked$train)),
-            input$forward_criterion == "custom" ~ max(input$forward_k, 0.1),
-            TRUE ~ 2
-        )
-        step_model <- stats::step(
-            null_model,
-            k = k,
-            direction = "forward",
-            scope = list(lower = null_model, upper = full_model),
-            trace = 0
-        )
+        forward_cached <- get_cached_model("forward", forward_config)
+        step_model <- if (!is.null(forward_cached)) {
+            forward_cached$model
+        } else {
+            stats::step(
+                null_model,
+                k = k,
+                direction = "forward",
+                scope = list(lower = null_model, upper = full_model),
+                trace = 0
+            )
+        }
         preds <- predict(step_model, newdata = baked$test)
         preds_df <- tibble(
             ConvertedCompYearly = baked$test$ConvertedCompYearly,
@@ -1000,6 +1089,13 @@ server <- function(input, output, session) {
         )
     })
     lasso_model <- reactive({
+        lasso_config <- list(
+            log_outcome = isTRUE(input$lasso_log),
+            normalize = isTRUE(input$lasso_normalize),
+            drop_corr = isTRUE(input$lasso_drop_corr),
+            corr_threshold = input$lasso_corr_threshold,
+            penalty = input$lasso_penalty
+        )
         print("Calculating Lasso...")
         baked <- lasso_baked()
         predictors <- baked$train %>%
@@ -1014,7 +1110,8 @@ server <- function(input, output, session) {
         ) %>%
             set_engine("glmnet") %>%
             set_mode("regression")
-        fit <- lasso_spec %>% fit(lasso_formula, data = baked$train)
+        lasso_cached <- get_cached_model("lasso", lasso_config)
+        fit <- if (!is.null(lasso_cached)) lasso_cached$model else lasso_spec %>% fit(lasso_formula, data = baked$train)
         preds <- predict(fit, new_data = baked$test) %>%
             bind_cols(baked$test %>% select(ConvertedCompYearly))
         metrics <- lasso_metrics(preds, truth = ConvertedCompYearly, estimate = .pred)
@@ -1048,6 +1145,13 @@ server <- function(input, output, session) {
         )
     })
     ridge_model <- reactive({
+        ridge_config <- list(
+            log_outcome = isTRUE(input$ridge_log),
+            normalize = isTRUE(input$ridge_normalize),
+            drop_corr = isTRUE(input$ridge_drop_corr),
+            corr_threshold = input$ridge_corr_threshold,
+            penalty = input$ridge_penalty
+        )
         print("Calculating Ridge...")
         baked <- ridge_baked()
         predictors <- baked$train %>%
@@ -1062,7 +1166,8 @@ server <- function(input, output, session) {
         ) %>%
             set_engine("glmnet") %>%
             set_mode("regression")
-        fit <- ridge_spec %>% fit(ridge_formula, data = baked$train)
+        ridge_cached <- get_cached_model("ridge", ridge_config)
+        fit <- if (!is.null(ridge_cached)) ridge_cached$model else ridge_spec %>% fit(ridge_formula, data = baked$train)
         preds <- predict(fit, new_data = baked$test) %>%
             bind_cols(baked$test %>% select(ConvertedCompYearly))
         metrics <- ridge_metrics(preds, truth = ConvertedCompYearly, estimate = .pred)

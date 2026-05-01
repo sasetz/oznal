@@ -2,7 +2,9 @@ library(tidyverse)
 library(infotheo)
 library(GGally)
 library(tidymodels)
-install.packages(c("tidyverse", "tidymodels", "infotheo", "GGally", "ranger"))
+
+install.packages(c("tidyverse", "tidymodels", "infotheo", "GGally", "ranger", "glmnet"))
+
 rm(list = ls())
 set.seed(124)
 
@@ -16,6 +18,17 @@ schema <- read_csv("data/survey_results_schema.csv", show_col_types = FALSE)
 
 dir.create("output", showWarnings = FALSE)
 dir.create(file.path("output", "plots"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path("output", "models"), recursive = TRUE, showWarnings = FALSE)
+models_dir <- file.path("output", "models")
+save_model_cache <- function(name, config, model) {
+  saveRDS(
+    list(config = config, model = model),
+    file.path(models_dir, paste0(name, ".rds"))
+  )
+  if (requireNamespace("yaml", quietly = TRUE)) {
+    yaml::write_yaml(config, file.path(models_dir, paste0(name, ".yaml")))
+  }
+}
 View(schema)
 View(data)
 cat("Rows:", nrow(data), ", Cols:", ncol(data), "\n")
@@ -739,6 +752,26 @@ cat(paste0('"', country_list2, '"', collapse = ", "))
 show_engines("linear_reg")
 lr_spec <- linear_reg(engine = "lm")
 lr_metrics <- metric_set(rmse, mae, rsq)
+lr_removed_vars <- c(
+  "Industry_Higher.Education",
+  "MainBranch_Occasional",
+  "Country_United.Kingdom.of.Great.Britain.and.Northern.Ireland",
+  "EdLevel_Other",
+  "RemoteWork_Flexible",
+  "Country_Canada",
+  "DevType_BusinessAnalyst",
+  "DevType_SysAdmin",
+  "MainBranch_Adjacent",
+  "Industry_None",
+  "MainBranch_ExDeveloper",
+  "Industry_Insurance",
+  "DevType_Support",
+  "Industry_Government",
+  "EdLevel_Primary",
+  "Age",
+  "YearsCode"
+)
+lr_removed_prefixes <- c("SO", "AI")
 
 workflow() %>%
     add_recipe(lr_recipe) %>%
@@ -747,6 +780,32 @@ workflow() %>%
 
 lm_fit_result %>% extract_workflow() %>% tidy(conf.int = TRUE) %>% View()
 lm_fit_result %>% collect_metrics()
+
+lr_baked <- lr_recipe %>%
+  prep(training = train_data) %>%
+  bake(new_data = NULL)
+lr_predictors <- lr_baked %>%
+  select(-ConvertedCompYearly) %>%
+  colnames()
+lr_predictors <- lr_predictors[!lr_predictors %in% lr_removed_vars]
+lr_predictors <- lr_predictors[!str_detect(lr_predictors, paste0("^(", paste(lr_removed_prefixes, collapse = "|"), ")"))]
+lr_train_baked <- lr_baked %>%
+  select(all_of(c("ConvertedCompYearly", lr_predictors)))
+lr_formula <- as.formula(
+  paste("ConvertedCompYearly ~", paste(lr_predictors, collapse = " + "))
+)
+lr_fit <- lr_spec %>% fit(lr_formula, data = lr_train_baked)
+save_model_cache(
+  "lr_default",
+  list(
+    log_outcome = FALSE,
+    normalize = FALSE,
+    drop_corr = FALSE,
+    corr_threshold = 0.7,
+    predictors = lr_predictors
+  ),
+  lr_fit
+)
 
 lm_fit_result %>%
     collect_predictions() %>%
@@ -796,6 +855,8 @@ rf_spec <- rand_forest(
     mtry = 10,
     min_n = 7)
 rf_metrics <- metric_set(mse, mae, mape, rmse)
+rf_removed_vars <- lr_removed_vars
+rf_removed_prefixes <- lr_removed_prefixes
 
 rf_preds %>%
     mutate(abs_perc_err = abs((ConvertedCompYearly - .pred) / ConvertedCompYearly)) %>%
@@ -819,6 +880,32 @@ workflow() %>%
 
 rf_fit_result %>%
     collect_metrics()
+
+rf_baked <- rf_recipe %>%
+  prep(training = train_data) %>%
+  bake(new_data = NULL)
+rf_predictors <- rf_baked %>%
+  select(-ConvertedCompYearly) %>%
+  colnames()
+rf_predictors <- rf_predictors[!rf_predictors %in% rf_removed_vars]
+rf_predictors <- rf_predictors[!str_detect(rf_predictors, paste0("^(", paste(rf_removed_prefixes, collapse = "|"), ")"))]
+rf_train_baked <- rf_baked %>%
+  select(all_of(c("ConvertedCompYearly", rf_predictors)))
+rf_formula <- as.formula(
+  paste("ConvertedCompYearly ~", paste(rf_predictors, collapse = " + "))
+)
+rf_fit <- rf_spec %>% fit(rf_formula, data = rf_train_baked)
+save_model_cache(
+  "rf_default",
+  list(
+    log_outcome = FALSE,
+    trees = 6000,
+    mtry = 10,
+    min_n = 7,
+    predictors = rf_predictors
+  ),
+  rf_fit
+)
 
 rf_fit_result %>%
     collect_predictions() %>%
@@ -869,6 +956,31 @@ workflow() %>%
 
 swm_fit_result %>% collect_metrics()
 swm_fit_result %>% collect_predictions()
+
+svm_baked <- svm_recipe %>%
+  prep(training = train_data) %>%
+  bake(new_data = NULL)
+svm_predictors <- svm_baked %>%
+  select(-ConvertedCompYearly) %>%
+  colnames()
+svm_train_baked <- svm_baked %>%
+  select(all_of(c("ConvertedCompYearly", svm_predictors)))
+svm_formula <- as.formula(
+  paste("ConvertedCompYearly ~", paste(svm_predictors, collapse = " + "))
+)
+svm_fit <- swm %>% fit(svm_formula, data = svm_train_baked)
+save_model_cache(
+  "svm_default",
+  list(
+    log_outcome = TRUE,
+    normalize = TRUE,
+    drop_corr = TRUE,
+    corr_threshold = 0.7,
+    cost = 10,
+    margin = 0.01
+  ),
+  svm_fit
+)
 
 swm_fit_result %>% 
   collect_predictions() %>% 
@@ -1016,11 +1128,23 @@ evaluation_table <- data.frame(
   predicted = test_predictions
 )
 
-library(yardstick)
 metrics <- evaluation_table %>%
   metrics(truth = actual, estimate = predicted)
 
 print(metrics)
+
+save_model_cache(
+  "forward_default",
+  list(
+    log_outcome = TRUE,
+    normalize = TRUE,
+    drop_corr = TRUE,
+    corr_threshold = 0.7,
+    criterion = "bic",
+    k = log(n)
+  ),
+  forward_step_model
+)
 
 ggplot(evaluation_table, aes(x = actual, y = predicted)) +
   geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
@@ -1063,6 +1187,30 @@ workflow() %>%
 lasso_fit_result %>% collect_metrics()
 
 lasso_predictions <- lasso_fit_result %>% collect_predictions()
+
+lasso_baked <- lr_recipe_lasso %>%
+  prep(training = train_data) %>%
+  bake(new_data = NULL)
+lasso_predictors <- lasso_baked %>%
+  select(-ConvertedCompYearly) %>%
+  colnames()
+lasso_train_baked <- lasso_baked %>%
+  select(all_of(c("ConvertedCompYearly", lasso_predictors)))
+lasso_formula <- as.formula(
+  paste("ConvertedCompYearly ~", paste(lasso_predictors, collapse = " + "))
+)
+lasso_fit <- lasso_spec %>% fit(lasso_formula, data = lasso_train_baked)
+save_model_cache(
+  "lasso_default",
+  list(
+    log_outcome = TRUE,
+    normalize = TRUE,
+    drop_corr = TRUE,
+    corr_threshold = 0.7,
+    penalty = 0.01
+  ),
+  lasso_fit
+)
 
 ggplot(lasso_predictions, aes(x = ConvertedCompYearly, y = .pred)) +
   geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
@@ -1141,6 +1289,30 @@ workflow() %>%
 ridge_fit_result %>% collect_metrics()
 
 ridge_predictions <- ridge_fit_result %>% collect_predictions()
+
+ridge_baked <- lr_recipe_lasso %>%
+  prep(training = train_data) %>%
+  bake(new_data = NULL)
+ridge_predictors <- ridge_baked %>%
+  select(-ConvertedCompYearly) %>%
+  colnames()
+ridge_train_baked <- ridge_baked %>%
+  select(all_of(c("ConvertedCompYearly", ridge_predictors)))
+ridge_formula <- as.formula(
+  paste("ConvertedCompYearly ~", paste(ridge_predictors, collapse = " + "))
+)
+ridge_fit <- ridge_spec %>% fit(ridge_formula, data = ridge_train_baked)
+save_model_cache(
+  "ridge_default",
+  list(
+    log_outcome = TRUE,
+    normalize = TRUE,
+    drop_corr = TRUE,
+    corr_threshold = 0.7,
+    penalty = 0.01
+  ),
+  ridge_fit
+)
 
 ggplot(ridge_predictions, aes(x = ConvertedCompYearly, y = .pred)) +
   geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
