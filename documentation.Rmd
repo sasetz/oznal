@@ -12,6 +12,7 @@ library(infotheo)
 library(GGally)
 library(tidymodels)
 library(ggridges)
+library(LiblineaR)
 ```
 
 # The Quest
@@ -615,6 +616,7 @@ on, a lot of variables and noise, so we'll use random forest rather than a
 decision tree.
 
 The random forest works better with categorical values than linear regression, since it doesn't need them encoded in multiple values. Let's prepare the recipe for our model fitting and evaluation.
+We keep the preprocessing minimal here to let the model handle non-linearities and interactions on its own.
 
 ```{r rf_recipe}
 rf_recipe <- final_recipe %>%
@@ -629,6 +631,7 @@ rf_recipe <- final_recipe %>%
 ```
 
 The best hyperparameters we can find are the following: 2000 trees, 10 random variables are selected (from ~25), minimum 2 data points in a node. We selected MSE, MAE, MAPE and RMSE as our metrics.
+This section is mostly to compare a tree-based baseline with the linear models above.
 
 ```{r rf_workflow}
 rf_spec <- rand_forest(
@@ -650,6 +653,7 @@ rf_fit_result %>%
 ```
 
 Unfortunately, the metrics are very disappointing. The model completely fails to capture the relationship between predictors and the outcome, producing absurd metrics. The model just fits the distribution's mean, as seen on the plot below.
+We still keep the plot to show the expected shape of the predictions.
 
 ```{r rf_plot,echo=FALSE}
 rf_fit_result %>%
@@ -663,5 +667,260 @@ rf_fit_result %>%
 ```
 
 Hyperparameter tuning, change in encoding, different predictors all produce the same results. Random forest does not capture the variance of the outcome variable.
+
+# SVM
+
+We also fit a linear SVM model. Since it is sensitive to scaling, we add normalization and remove correlated numeric predictors. The recipe includes a log transform for the outcome, matching the setup in the script.
+This model is fast to fit and gives a useful linear baseline after stronger preprocessing.
+
+```{r svm_recipe}
+svm_recipe <- final_recipe %>%
+    step_naomit(has_role("outcome")) %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+    step_rm(Age, YearsCode) %>%
+    step_log(ConvertedCompYearly, base = 10) %>%
+    step_dummy(has_role("nominal"), one_hot = TRUE) %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
+    step_corr(all_numeric_predictors(), threshold = 0.7) %>%
+    step_normalize(all_numeric_predictors())
+```
+
+```{r svm_workflow}
+svm_spec <- svm_linear(
+    cost = 10,
+    margin = 0.01
+) %>%
+    set_engine("LiblineaR") %>%
+    set_mode("regression")
+
+workflow() %>%
+    add_recipe(svm_recipe) %>%
+    add_model(svm_spec) %>%
+    last_fit(data_split) -> swm_fit_result
+
+swm_fit_result %>% collect_metrics()
+```
+
+The prediction scatter helps us see how tight the fit is across the range of salaries.
+
+```{r svm_plot, echo=FALSE}
+swm_fit_result %>%
+    collect_predictions() %>%
+    ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
+    geom_abline(lty = 2, color = "red") +
+    geom_point(alpha = 0.1) +
+    labs(title = "Actual vs Predicted ConvertedCompYearly SVM",
+             x = "Actual",
+             y = "Predicted") +
+    theme_minimal()
+```
+
+```{r svm_residual, echo=FALSE}
+swm_fit_result %>%
+    collect_predictions() %>%
+    mutate(.resid = ConvertedCompYearly - .pred) %>%
+    ggplot(aes(x = .pred, y = .resid)) +
+    geom_point(alpha = 0.4, color = "gray50") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+    geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+    labs(
+        title = "Residual vs. Fitted Plot SVM",
+        subtitle = "Checking for homoscedasticity and linearity",
+        x = "Predicted Values",
+        y = "Residuals"
+    ) +
+    theme_minimal()
+```
+
+The residuals plot is included to check whether there is a clear pattern left in the errors.
+
+# Forward Selection
+
+We use a forward stepwise procedure on a log-transformed linear model. We bake the recipe into a training frame first, then use `step()` to select predictors.
+The selection criterion is set to BIC here to keep the model compact.
+
+```{r forward_recipe}
+lr_recipe2 <- final_recipe %>%
+    step_naomit(has_role("outcome")) %>%
+    step_log(ConvertedCompYearly, base = 10) %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+    step_rm(Age, YearsCode) %>%
+    step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+    step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat"))  %>%
+    step_corr(all_numeric_predictors(), threshold = 0.7) %>%
+    step_normalize(all_numeric_predictors())
+```
+
+```{r forward_workflow}
+lr_recipe2_prepped <- lr_recipe2 %>%
+        prep(training = train_data)
+
+train_data_baked <- bake(lr_recipe2_prepped, new_data = NULL)
+
+null_model <- lm(ConvertedCompYearly ~ 1, data = train_data_baked)
+full_model <- lm(ConvertedCompYearly ~ ., data = train_data_baked)
+
+n <- nrow(train_data_baked)
+
+forward_step_model <- stats::step(
+    null_model,
+    k = log(n),
+    direction = "forward",
+    scope = list(lower = null_model, upper = full_model),
+    trace = 1
+)
+```
+
+```{r forward_eval}
+test_data_baked <- bake(lr_recipe2_prepped, new_data = test_data)
+test_predictions <- predict(forward_step_model, newdata = test_data_baked)
+
+evaluation_table <- data.frame(
+    actual = test_data_baked$ConvertedCompYearly,
+    predicted = test_predictions
+)
+
+metrics <- evaluation_table %>%
+    metrics(truth = actual, estimate = predicted)
+
+metrics
+```
+
+The scatter plot below summarizes the test-set fit after selection.
+
+```{r forward_plot, echo=FALSE}
+ggplot(evaluation_table, aes(x = actual, y = predicted)) +
+    geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
+    geom_point(alpha = 0.1, color = "midnightblue") +
+    labs(
+        title = "Actual vs Predicted Salary (Forward Selection)",
+        subtitle = "Log-transformed Scale (test)",
+        x = "Actual Salary (Log)",
+        y = "Predicted Salary (Log)"
+    ) +
+    theme_minimal()
+```
+
+# Lasso
+
+We fit a lasso regression with the same preprocessing steps as forward selection. The penalty is kept fixed.
+This lets us shrink coefficients while keeping the recipe identical for comparison.
+
+```{r lasso_recipe}
+lr_recipe_lasso <- final_recipe %>%
+    step_naomit(has_role("outcome")) %>%
+    step_log(ConvertedCompYearly, base = 10) %>%
+    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+    step_rm(Age, YearsCode) %>%
+    step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+    step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+    step_ordinalscore(has_role("ordinal"), -c("JobSat"))  %>%
+    step_corr(all_numeric_predictors(), threshold = 0.7) %>%
+    step_normalize(all_numeric_predictors())
+```
+
+```{r lasso_workflow}
+lasso_spec <- linear_reg(
+    penalty = 0.01,
+    mixture = 1
+) %>%
+    set_engine("glmnet") %>%
+    set_mode("regression")
+
+workflow() %>%
+    add_recipe(lr_recipe_lasso) %>%
+    add_model(lasso_spec) %>%
+    last_fit(data_split) -> lasso_fit_result
+
+lasso_fit_result %>% collect_metrics()
+```
+
+We show both the prediction scatter and the residuals to match the linear regression section.
+
+```{r lasso_plot, echo=FALSE}
+lasso_predictions <- lasso_fit_result %>% collect_predictions()
+
+ggplot(lasso_predictions, aes(x = ConvertedCompYearly, y = .pred)) +
+    geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
+    geom_point(alpha = 0.2, color = "darkgreen") +
+    labs(
+        title = "Actual vs Predicted Salary (Lasso Regression)",
+        subtitle = "Log-transformed Scale, Penalty = 0.01",
+        x = "Actual Salary (Log)",
+        y = "Predicted Salary (Log)"
+    ) +
+    theme_minimal()
+```
+
+```{r lasso_residual, echo=FALSE}
+lasso_predictions %>%
+    mutate(.resid = ConvertedCompYearly - .pred) %>%
+    ggplot(aes(x = .pred, y = .resid)) +
+    geom_point(alpha = 0.4, color = "gray50") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+    geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+    labs(
+        title = "Residual vs. Fitted Plot Lasso",
+        subtitle = "Checking for homoscedasticity and linearity",
+        x = "Predicted Values",
+        y = "Residuals"
+    ) +
+    theme_minimal()
+```
+
+# Ridge
+
+The ridge model uses the same recipe as lasso, but with an $\ell_2$ penalty.
+This keeps all predictors while still regularizing the coefficients.
+
+```{r ridge_workflow}
+ridge_spec <- linear_reg(
+    penalty = 0.01,
+    mixture = 0
+) %>%
+    set_engine("glmnet") %>%
+    set_mode("regression")
+
+workflow() %>%
+    add_recipe(lr_recipe_lasso) %>%
+    add_model(ridge_spec) %>%
+    last_fit(data_split) -> ridge_fit_result
+
+ridge_fit_result %>% collect_metrics()
+```
+
+The plots below mirror the lasso outputs for a direct visual comparison.
+
+```{r ridge_plot, echo=FALSE}
+ridge_predictions <- ridge_fit_result %>% collect_predictions()
+
+ggplot(ridge_predictions, aes(x = ConvertedCompYearly, y = .pred)) +
+    geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
+    geom_point(alpha = 0.2, color = "darkgreen") +
+    labs(
+        title = "Actual vs Predicted Salary (Ridge Regression)",
+        subtitle = "Log-transformed Scale, Penalty = 0.01",
+        x = "Actual Salary (Log)",
+        y = "Predicted Salary (Log)"
+    ) +
+    theme_minimal()
+```
+
+```{r ridge_residual, echo=FALSE}
+ridge_predictions %>%
+    mutate(.resid = ConvertedCompYearly - .pred) %>%
+    ggplot(aes(x = .pred, y = .resid)) +
+    geom_point(alpha = 0.4, color = "gray50") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+    geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+    labs(
+        title = "Residual vs. Fitted Plot Ridge",
+        subtitle = "Checking for homoscedasticity and linearity",
+        x = "Predicted Values",
+        y = "Residuals"
+    ) +
+    theme_minimal()
+```
 
 
