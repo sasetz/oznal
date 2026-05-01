@@ -163,12 +163,12 @@ plot_distinct <- function(x) {
 view_stats <- function(x, variable) {
     x %>%
         summarise(
-            n = sum(!is.na(.data_filtered[[variable]])),
-            missing = sum(is.na(.data_filtered[[variable]])),
-            mean = mean(as.numeric(.data_filtered[[variable]]), na.rm = TRUE),
-            median = median(as.numeric(.data_filtered[[variable]]), na.rm = TRUE),
-            p25 = quantile(as.numeric(.data_filtered[[variable]]), 0.25, na.rm = TRUE),
-            p75 = quantile(as.numeric(.data_filtered[[variable]]), 0.75, na.rm = TRUE)
+            n = sum(!is.na(.data[[variable]])),
+            missing = sum(is.na(.data[[variable]])),
+            mean = mean(as.numeric(.data[[variable]]), na.rm = TRUE),
+            median = median(as.numeric(.data[[variable]]), na.rm = TRUE),
+            p25 = quantile(as.numeric(.data[[variable]]), 0.25, na.rm = TRUE),
+            p75 = quantile(as.numeric(.data[[variable]]), 0.75, na.rm = TRUE)
         ) %>%
         View()
 }
@@ -176,11 +176,11 @@ view_stats <- function(x, variable) {
 view_explode_distinct <- function(x, variable) {
     x %>%
         select(all_of(variable)) %>%
-        filter(!is.na(.data_filtered[[variable]])) %>%
+        filter(!is.na(.data[[variable]])) %>%
         separate_longer_delim(all_of(variable), delim = regex(";\\s*")) %>%
-        group_by(.data_filtered[[variable]]) %>%
+        group_by(.data[[variable]]) %>%
         summarise(count = n()) %>%
-        arrange(.data_filtered[[variable]]) %>%
+        arrange(.data[[variable]]) %>%
         distinct() %>%
         View()
 }
@@ -295,13 +295,13 @@ data_cleaned %>%
             )
            ) %>%
     select(ConvertedCompYearly, Employment, Country) %>%
-    filter(ConvertedCompYearly <= high_cutoff) %>%
+    filter(ConvertedCompYearly <= upper_bound) %>%
     ggplot(mapping = aes(x = ConvertedCompYearly, y = Country, fill = Country)) +
     geom_density_ridges() +
     theme_minimal() +
     theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
     facet_wrap(~Employment) +
-    coord_transform(xlim = c(0, high_cutoff))
+    coord_transform(xlim = c(0, upper_bound))
 
 #-- Clean outliers in numeric values
 # We see unusually large number of tools and years of code and workexp.
@@ -781,7 +781,7 @@ lm_fit_result %>%
 
 rf_recipe <- final_recipe %>%
     step_naomit(has_role("outcome")) %>%
-    step_log(all_outcomes()) %>%
+    #step_log(all_outcomes()) %>%
     step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
     #step_rm(Age, YearsCode, starts_with("SO"), starts_with("AI")) %>%
     #step_dummy(has_role("nominal"), one_hot = FALSE) %>%
@@ -792,7 +792,7 @@ rf_recipe <- final_recipe %>%
 rf_spec <- rand_forest(
     mode = "regression",
     engine = "ranger",
-    trees = 1000,
+    trees = 6000,
     mtry = 10,
     min_n = 7)
 rf_metrics <- metric_set(mse, mae, mape, rmse)
@@ -809,7 +809,7 @@ rf_preds %>%
 
 set.seed(142)
 rf_data_split <- data_cleaned %>%
-    mutate(ConvertedCompYearly = log(ConvertedCompYearly)) %>%
+    slice_sample(n = 3000) %>%
     initial_split(prop = .8)
 
 workflow() %>%
@@ -820,12 +820,9 @@ workflow() %>%
 rf_fit_result %>%
     collect_metrics()
 
-rf_preds <- rf_fit_result %>% collect_predictions()
-
 rf_fit_result %>%
-    collect_
-
-ggplot(rf_preds) +
+    collect_predictions() %>%
+    ggplot() +
     geom_density(aes(x = ConvertedCompYearly, fill = "Actual"), alpha = 0.4) +
     geom_density(aes(x = .pred, fill = "Predicted"), alpha = 0.4) +
     scale_fill_manual(values = c("Actual" = "black", "Predicted" = "blue")) +
