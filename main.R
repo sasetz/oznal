@@ -970,7 +970,7 @@ forward_step_model <- stats::step(
   k = log(n),
   direction = "forward", 
   scope = list(lower = null_model, upper = full_model), 
-  trace = 1 # постав 1, якщо хочеш бачити процес додавання кожної змінної
+  trace = 1 
 )
 
 features_count <- length(coef(forward_step_model)) - 1
@@ -986,7 +986,7 @@ forward_results %>%
   geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
   geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
   labs(
-    title = "Residual vs. Fitted Plot: Forward Selection",
+    title = "Residual vs. Fitted Plot Forward Selection",
     subtitle = "Checking for homoscedasticity and linearity after feature selection",
     x = "Predicted Values (Log Scale)",
     y = "Residuals"
@@ -996,7 +996,7 @@ forward_results %>%
 tidy(forward_step_model) %>%
   filter(term != "(Intercept)") %>%
   mutate(abs_estimate = abs(estimate)) %>%
-  slice_max(abs_estimate, n = 20) %>% # Беремо тільки топ-20
+  slice_max(abs_estimate, n = 20) %>% 
   mutate(term = reorder(term, estimate)) %>%
   ggplot(aes(x = term, y = estimate, fill = estimate > 0)) +
   geom_col() +
@@ -1085,7 +1085,7 @@ lasso_predictions %>%
   geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
   geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
   labs(
-    title = "Residual vs. Fitted Plot SVM",
+    title = "Residual vs. Fitted Plot Lasso",
     subtitle = "Checking for homoscedasticity and linearity",
     x = "Predicted Values",
     y = "Residuals"
@@ -1126,4 +1126,80 @@ ggplot(top_20, aes(x = estimate, y = term, fill = estimate > 0)) +
   theme_minimal()
 
 #----Ridge ---
+
+
+ridge_spec <- linear_reg(
+  penalty = 0.01, 
+  mixture = 0     
+) %>%
+  set_engine("glmnet") %>%
+  set_mode("regression")
+
+workflow() %>%
+  add_recipe(lr_recipe_lasso) %>%
+  add_model(ridge_spec) %>%
+  last_fit(data_split) -> ridge_fit_result
+
+
+ridge_fit_result %>% collect_metrics()
+
+ridge_predictions <- ridge_fit_result %>% collect_predictions()
+
+ggplot(ridge_predictions, aes(x = ConvertedCompYearly, y = .pred)) +
+  geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
+  geom_point(alpha = 0.2, color = "darkgreen") +
+  labs(
+    title = "Actual vs Predicted Salary (Ridge Regression) ",
+    subtitle = "Log-transformed Scale, Penalty = 0.01",
+    x = "Actual Salary (Log)",
+    y = "Predicted Salary (Log)"
+  ) +
+  theme_minimal()
+
+ridge_predictions %>%
+  mutate(.resid = ConvertedCompYearly - .pred) %>%
+  ggplot(aes(x = .pred, y = .resid)) +
+  geom_point(alpha = 0.4, color = "gray50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+  geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+  labs(
+    title = "Residual vs. Fitted Plot Ridge",
+    subtitle = "Checking for homoscedasticity and linearity",
+    x = "Predicted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+model_obj <- ridge_fit_result %>% 
+  extract_fit_parsnip()
+
+importance_df <- tidy(model_obj) %>%
+  filter(term != "(Intercept)") %>%
+  filter(estimate != 0) %>%
+  mutate(abs_importance = abs(estimate)) %>%
+  arrange(desc(abs_importance))
+
+nrow(importance_df)
+print(importance_df)
+
+top_20 <- importance_df %>%
+  slice_max(abs(estimate), n = 20) %>%
+  mutate(term = reorder(term, estimate))
+top_20 
+
+
+ggplot(top_20, aes(x = estimate, y = term, fill = estimate > 0)) +
+  geom_col() +
+  scale_fill_manual(
+    values = c("firebrick", "steelblue"), 
+    labels = c("Negative Impact", "Positive Impact")
+  ) +
+  labs(
+    title = "Top 20 Feature Importance (Ridge)",
+    subtitle = "Log-Coefficient Impact on Salary",
+    x = "Model Coefficient (Estimate)",
+    y = NULL,
+    fill = "Impact Direction"
+  ) +
+  theme_minimal()
 
