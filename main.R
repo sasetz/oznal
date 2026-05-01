@@ -919,11 +919,18 @@ rf_fit_result %>%
 
 
 #---- 5. SVM ----
+# The next model we've chosen is an SVM with a linear kernel.
+# We have a large number of rows to train on and many variables,
+# so it will be computationally difficult to use another type of kernel,
+# as its computational complexity would scale quadratically
+
 svm_recipe <- final_recipe %>%
   step_naomit(has_role("outcome")) %>%
   # step_rm(contains("Country"))%>%
   step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
   step_rm(Age, YearsCode) %>%
+  # due to long tail in ConvertedCompYearly, we convert it into log
+  # so the difference between small and big numbers will be the same
   step_log(ConvertedCompYearly, base = 10) %>%
   step_dummy(has_role("nominal"), one_hot = TRUE) %>%
   step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
@@ -952,10 +959,15 @@ workflow() %>%
   add_recipe(svm_recipe) %>%
   add_model(swm) %>%
   last_fit(data_split) -> swm_fit_result
-
+# Metrics
+# rsme - 0.328
+# rsq - 0.491
 
 swm_fit_result %>% collect_metrics()
 swm_fit_result %>% collect_predictions()
+# We see that model strugle with small data,
+# but without log-transformation it strugled with large number of ConvertedCompYearly
+# It can be explain by not enough amount of examples with small salaries
 
 svm_baked <- svm_recipe %>%
   prep(training = train_data) %>%
@@ -992,6 +1004,10 @@ swm_fit_result %>%
        y = "Predicted") +
   theme_minimal()
 
+
+# The linear model generally fits the data well,
+# although there are small systematic deviations at the edges of the prediction range.
+# The points are slightly deviated from the shape of the cloud, indicating heteroscedasticity in the data.
 
 swm_fit_result %>%
   collect_predictions() %>%
@@ -1050,6 +1066,8 @@ ggplot(top_15, aes(x = Importance, y = Variable, fill = Importance > 0)) +
 
 #-----Forward ----
 
+# The next model we've chosen is Forward method with Linear Regression.
+
 
 lr_recipe2 <- final_recipe %>%
   step_naomit(has_role("outcome")) %>%
@@ -1068,12 +1086,17 @@ lr_recipe2_prepped <- lr_recipe2 %>%
 train_data_baked <- bake(lr_recipe2_prepped, new_data = NULL)
 
 
+# model with no predictors, just the intercept
 null_model <- lm(ConvertedCompYearly ~ 1, data = train_data_baked)
-
+# model with all possible predictors
 full_model <- lm(ConvertedCompYearly ~ ., data = train_data_baked)
 
 n <- nrow(train_data_baked)
 
+# Forward stepwise selection using BIC instead of AIC
+# BIC tends to be more conservative and penalizes models with many features more heavily than AIC.
+# While AIC have resulted in a larger model with 77 features, we chose BIC to shorten the model by making the selection
+# process stricter, focusing on a more important features
 forward_step_model <- stats::step(
   null_model, 
   k = log(n),
@@ -1082,13 +1105,17 @@ forward_step_model <- stats::step(
   trace = 1 
 )
 
+# number of features 42
 features_count <- length(coef(forward_step_model)) - 1
 print(features_count)
-
+# The metrics are pretty much the same as those of the SVM,
+# but this is still the best result we could achieve.
+# We can see that all the chosen features are significant based on p-values
 summary(forward_step_model)
 
 forward_results <- augment(forward_step_model)
-
+# The graph also indicates slight heteroscedasticity,
+# but the line remains fairly straight
 forward_results %>%
   ggplot(aes(x = .fitted, y = .resid)) +
   geom_point(alpha = 0.4, color = "gray50") +
@@ -1128,10 +1155,12 @@ evaluation_table <- data.frame(
   predicted = test_predictions
 )
 
+# the same as train metrics
 metrics <- evaluation_table %>%
   metrics(truth = actual, estimate = predicted)
 
 print(metrics)
+# The same issue with small salaries appears in the graph, just like in the SVM graph
 
 save_model_cache(
   "forward_default",
@@ -1159,7 +1188,8 @@ ggplot(evaluation_table, aes(x = actual, y = predicted)) +
 
 #----Lasso ---
 
-
+# The next model we've chosen is Lasso method with Linear Regression.
+# the process will be pretty much the same 
 lr_recipe_lasso <- final_recipe %>%
   step_naomit(has_role("outcome")) %>%
   step_log(ConvertedCompYearly, base = 10) %>%
@@ -1171,6 +1201,7 @@ lr_recipe_lasso <- final_recipe %>%
   step_corr(all_numeric_predictors(), threshold = 0.7) %>%
   step_normalize(all_numeric_predictors())
 
+# model with best paraemters
 lasso_spec <- linear_reg(
   penalty = 0.01, 
   mixture = 1     
@@ -1183,10 +1214,12 @@ workflow() %>%
   add_model(lasso_spec) %>%
   last_fit(data_split) -> lasso_fit_result
 
-
+#  The metric rsq is a little smaller, and the error is a little larger
 lasso_fit_result %>% collect_metrics()
 
 lasso_predictions <- lasso_fit_result %>% collect_predictions()
+
+# The same issue with small salaries appears in the graph, just like in the SVM and Forward graphs
 
 lasso_baked <- lr_recipe_lasso %>%
   prep(training = train_data) %>%
@@ -1223,6 +1256,10 @@ ggplot(lasso_predictions, aes(x = ConvertedCompYearly, y = .pred)) +
   ) +
   theme_minimal()
 
+# We see larger deviations at the ends, especially with small salaries.
+# The blue line is not as straight as in the SVM and Forward graphs.
+# The residuals display a diamond-shaped distribution, indicating heteroscedasticity
+
 lasso_predictions %>%
   mutate(.resid = ConvertedCompYearly - .pred) %>%
   ggplot(aes(x = .pred, y = .resid)) +
@@ -1245,7 +1282,7 @@ importance_df <- tidy(model_obj) %>%
   filter(estimate != 0) %>%
   mutate(abs_importance = abs(estimate)) %>%
   arrange(desc(abs_importance))
-
+# 40 features
 nrow(importance_df)
 print(importance_df)
 
@@ -1270,9 +1307,12 @@ ggplot(top_20, aes(x = estimate, y = term, fill = estimate > 0)) +
   ) +
   theme_minimal()
 
+# the Forward method seems to be more stable than Lasso because Lasso is more harsh
+# and focus only on big signals
 #----Ridge ---
 
-
+# the process will be pretty much the same but with Ridge method in Linear Regression 
+# model with the best parameters
 ridge_spec <- linear_reg(
   penalty = 0.01, 
   mixture = 0     
@@ -1285,10 +1325,12 @@ workflow() %>%
   add_model(ridge_spec) %>%
   last_fit(data_split) -> ridge_fit_result
 
-
+# metrics are very smilar to SVM and Forward
 ridge_fit_result %>% collect_metrics()
 
 ridge_predictions <- ridge_fit_result %>% collect_predictions()
+
+# The same issue with small salaries appears in the graph, just like in the SVM and Forward and Lasso graphs
 
 ridge_baked <- lr_recipe_lasso %>%
   prep(training = train_data) %>%
@@ -1324,7 +1366,9 @@ ggplot(ridge_predictions, aes(x = ConvertedCompYearly, y = .pred)) +
     y = "Predicted Salary (Log)"
   ) +
   theme_minimal()
-
+# The line seems to be the same as in the SVM and Forward graphs.
+# We don't see any difference. The graph also indicates slight 
+# heteroscedasticity, and the line is less straight at the edges.
 ridge_predictions %>%
   mutate(.resid = ConvertedCompYearly - .pred) %>%
   ggplot(aes(x = .pred, y = .resid)) +
@@ -1347,7 +1391,7 @@ importance_df <- tidy(model_obj) %>%
   filter(estimate != 0) %>%
   mutate(abs_importance = abs(estimate)) %>%
   arrange(desc(abs_importance))
-
+# 90 features
 nrow(importance_df)
 print(importance_df)
 
@@ -1371,4 +1415,23 @@ ggplot(top_20, aes(x = estimate, y = term, fill = estimate > 0)) +
     fill = "Impact Direction"
   ) +
   theme_minimal()
+
+# In 2 scenario, all three chosen methods performed well, showing similar rsq and rmse values.
+# Lasso had slightly worse metrics because it is a very strict and harsh method,
+# and maybe because it selected only 40 features, the smallest number.
+# Looking at the top 20 variables by importance, we can see that Lasso
+# and Ridge have similar top 20 features.
+# Forward selection has the same first 10 features as the previous two methods,
+# but the next 10 are somewhat different.
+# This can be explained by the fact that only a few features have large coefficients, while others have similar values.
+# Therefore, it depends on the method which features are selected.
+
+# The top 20 features always include county_usa, probably because we have the most records for this country.
+# At the same time, salaries are generally higher in the USA.
+# Other important features include worexp (work experience), orgsize (organization size),
+# and some variables related to degree. Country_Switzerland also appears frequently.
+# Negative predictors often include country india, likely due to the generally lower salaries there,
+# as well as country_ukraine, for similar reasons, and country_brazil.
+# Features such as student and work_in_person also appear.
+# All of these features seem to be reasonably chosen.
 

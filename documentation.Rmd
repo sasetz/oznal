@@ -8,11 +8,13 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
+library(LiblineaR)
 library(infotheo)
 library(GGally)
 library(tidymodels)
 library(ggridges)
-library(LiblineaR)
+library(vip)
+library(ggplot2)
 ```
 
 # The Quest
@@ -668,259 +670,448 @@ rf_fit_result %>%
 
 Hyperparameter tuning, change in encoding, different predictors all produce the same results. Random forest does not capture the variance of the outcome variable.
 
-# SVM
+# SVM 
 
-We also fit a linear SVM model. Since it is sensitive to scaling, we add normalization and remove correlated numeric predictors. The recipe includes a log transform for the outcome, matching the setup in the script.
-This model is fast to fit and gives a useful linear baseline after stronger preprocessing.
+The next model we've chosen is an SVM with a linear kernel.
+We have a large number of rows to train on and many variables, so it will be computationally difficult to use another type of kernel, as its computational complexity would scale quadratically
 
+Prepare data
 ```{r svm_recipe}
 svm_recipe <- final_recipe %>%
-    step_naomit(has_role("outcome")) %>%
-    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
-    step_rm(Age, YearsCode) %>%
-    step_log(ConvertedCompYearly, base = 10) %>%
-    step_dummy(has_role("nominal"), one_hot = TRUE) %>%
-    step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
-    step_corr(all_numeric_predictors(), threshold = 0.7) %>%
-    step_normalize(all_numeric_predictors())
+  step_naomit(has_role("outcome")) %>%
+  step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+  # strongly correlated
+  step_rm(Age, YearsCode) %>%
+  # due to long tail in ConvertedCompYearly, we convert it into log
+  # so the difference between small and big numbers will be the same
+  step_log(ConvertedCompYearly, base = 10) %>%
+  step_dummy(has_role("nominal"), one_hot = TRUE) %>%
+  step_ordinalscore(has_role("ordinal"), -c("JobSat")) %>%
+  # automatically drop correlated columns
+  step_corr(all_numeric_predictors(), threshold = 0.7) %>%
+  step_normalize(all_numeric_predictors())
 ```
 
-```{r svm_workflow}
-svm_spec <- svm_linear(
-    cost = 10,
-    margin = 0.01
-) %>%
-    set_engine("LiblineaR") %>%
-    set_mode("regression")
+
+the model with best parameters
+```{r svm_model}
+swm <- svm_linear(
+  cost = 10,               
+  margin = 0.01        
+) %>% 
+  set_engine("LiblineaR") %>% 
+  set_mode("regression")
+
 
 workflow() %>%
-    add_recipe(svm_recipe) %>%
-    add_model(svm_spec) %>%
-    last_fit(data_split) -> swm_fit_result
+  add_recipe(svm_recipe) %>%
+  add_model(swm) %>%
+  last_fit(data_split) -> swm_fit_result
+```
 
+Metrics
+rsme - 0.328
+rsq - 0.491
+```{r svm_metric}
 swm_fit_result %>% collect_metrics()
 ```
 
-The prediction scatter helps us see how tight the fit is across the range of salaries.
-
-```{r svm_plot, echo=FALSE}
-swm_fit_result %>%
-    collect_predictions() %>%
-    ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
-    geom_abline(lty = 2, color = "red") +
-    geom_point(alpha = 0.1) +
-    labs(title = "Actual vs Predicted ConvertedCompYearly SVM",
-             x = "Actual",
-             y = "Predicted") +
-    theme_minimal()
+We see that model strugle with small data,
+but without log-transformation it strugled with large number of ConvertedCompYearly
+It can be explain by not enough amount of examples with small salaries
+```{r svm_graph1 ,echo=FALSE}
+swm_fit_result %>% 
+  collect_predictions() %>% 
+  ggplot(aes(x = ConvertedCompYearly, y = .pred)) +
+  geom_abline(lty = 2, color = "red") +
+  geom_point(alpha = 0.1) +
+  labs(title = "Actual vs Predicted ConvertedCompYearly SVM",
+       x = "Actual ",
+       y = "Predicted") +
+  theme_minimal()
 ```
 
-```{r svm_residual, echo=FALSE}
+The linear model generally fits the data well, although there are small systematic deviations at the edges of the prediction range. The points are slightly deviated from the shape of the cloud, indicating heteroscedasticity in the data.
+```{r svm_graph2 ,echo=FALSE}
 swm_fit_result %>%
-    collect_predictions() %>%
-    mutate(.resid = ConvertedCompYearly - .pred) %>%
-    ggplot(aes(x = .pred, y = .resid)) +
-    geom_point(alpha = 0.4, color = "gray50") +
-    geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
-    geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
-    labs(
-        title = "Residual vs. Fitted Plot SVM",
-        subtitle = "Checking for homoscedasticity and linearity",
-        x = "Predicted Values",
-        y = "Residuals"
-    ) +
-    theme_minimal()
+  collect_predictions() %>%
+  mutate(.resid = ConvertedCompYearly - .pred) %>%
+  ggplot(aes(x = .pred, y = .resid)) +
+  geom_point(alpha = 0.4, color = "gray50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+  geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+  labs(
+    title = "Residual vs. Fitted Plot SVM",
+    subtitle = "Checking for homoscedasticity and linearity",
+    x = "Predicted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+swm_fit_result %>% extract_workflow()
 ```
 
-The residuals plot is included to check whether there is a clear pattern left in the errors.
+Feature importance
+```{r svm_features ,echo=FALSE}
+model_obj <- swm_fit_result %>% 
+  extract_fit_parsnip()
 
-# Forward Selection
+weights <- model_obj$fit$W
 
-We use a forward stepwise procedure on a log-transformed linear model. We bake the recipe into a training frame first, then use `step()` to select predictors.
-The selection criterion is set to BIC here to keep the model compact.
+importance_df <- data.frame(
+  Variable = colnames(weights),
+  Importance = as.vector(weights)
+  ) %>%
+  filter(Variable != "Bias") 
 
-```{r forward_recipe}
+top_15 <- importance_df %>%
+  slice_max(abs(Importance), n = 15) %>%
+  mutate(Variable = reorder(Variable, Importance))
+
+
+ggplot(top_15, aes(x = Importance, y = Variable, fill = Importance > 0)) +
+  geom_col() +
+  scale_fill_manual(
+    values = c("firebrick", "steelblue"), 
+    labels = c("Negative Impact", "Positive Impact")
+  ) +
+  labs(
+    title = "Top 10 Feature Importance (SVM)",
+    subtitle = "Factors affecting ConvertedCompYearly",
+    x = "Model Coefficient (Weight)",
+    y = NULL,
+    fill = "Impact"
+  ) +
+  theme_minimal()
+```
+# 3 scenario 
+
+# Forward
+
+The next model we've chosen is Forward method with Linear Regression.
+Prepare data
+```{r for_recipe}
 lr_recipe2 <- final_recipe %>%
-    step_naomit(has_role("outcome")) %>%
-    step_log(ConvertedCompYearly, base = 10) %>%
-    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
-    step_rm(Age, YearsCode) %>%
-    step_dummy(has_role("nominal"), one_hot = FALSE) %>%
-    step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
-    step_ordinalscore(has_role("ordinal"), -c("JobSat"))  %>%
-    step_corr(all_numeric_predictors(), threshold = 0.7) %>%
-    step_normalize(all_numeric_predictors())
+  step_naomit(has_role("outcome")) %>%
+  step_log(ConvertedCompYearly, base = 10) %>%
+  step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+  step_rm(Age, YearsCode) %>%
+  step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+  step_ordinalscore(has_role("ordinal"), -c("JobSat"))  %>%
+  step_corr(all_numeric_predictors(), threshold = 0.7) %>%
+  step_normalize(all_numeric_predictors())
+
+lr_recipe2_prepped <- lr_recipe2 %>% 
+    prep(training = train_data)
+  
+train_data_baked <- bake(lr_recipe2_prepped, new_data = NULL)
 ```
 
-```{r forward_workflow}
-lr_recipe2_prepped <- lr_recipe2 %>%
-        prep(training = train_data)
-
-train_data_baked <- bake(lr_recipe2_prepped, new_data = NULL)
-
+Forward stepwise selection using BIC instead of AIC
+BIC tends to be more conservative and penalizes models with many features more heavily than AIC. While AIC have resulted in a larger model with 77 features, we chose BIC to shorten the model by making the selection process stricter, focusing on a more important features
+```{r for_model}
 null_model <- lm(ConvertedCompYearly ~ 1, data = train_data_baked)
+
 full_model <- lm(ConvertedCompYearly ~ ., data = train_data_baked)
 
 n <- nrow(train_data_baked)
 
 forward_step_model <- stats::step(
-    null_model,
-    k = log(n),
-    direction = "forward",
-    scope = list(lower = null_model, upper = full_model),
-    trace = 1
+  null_model, 
+  k = log(n),
+  direction = "forward", 
+  scope = list(lower = null_model, upper = full_model), 
+  trace = 0 
 )
 ```
+number of features 42. The metrics are pretty much the same as those of the SVM,
+but this is still the best result we could achieve. We can see that all the chosen features are significant based on p-values
+```{r for_features}
+features_count <- length(coef(forward_step_model)) - 1
+print(features_count)
 
-```{r forward_eval}
+summary(forward_step_model)
+```
+
+The graph also indicates slight heteroscedasticity, but the line remains fairly straight
+
+```{r for_graph1 ,echo=FALSE}
+forward_results <- augment(forward_step_model)
+
+forward_results %>%
+  ggplot(aes(x = .fitted, y = .resid)) +
+  geom_point(alpha = 0.4, color = "gray50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+  geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+  labs(
+    title = "Residual vs. Fitted Plot Forward Selection",
+    subtitle = "Checking for homoscedasticity and linearity after feature selection",
+    x = "Predicted Values (Log Scale)",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+```
+Important features
+```{r r_features ,echo=FALSE}
+tidy(forward_step_model) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(abs_estimate = abs(estimate)) %>%
+  slice_max(abs_estimate, n = 20) %>% 
+  mutate(term = reorder(term, estimate)) %>%
+  ggplot(aes(x = term, y = estimate, fill = estimate > 0)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("firebrick", "dodgerblue4"), 
+                    labels = c("Negative", "Positive")) +
+  labs(title = "Top 20 Most Influential Features (Forward Selection)",
+       x = "Feature", y = "Log-Coefficient (Impact)") +
+  theme_minimal()
+```
+Test evaluation
+test metrics the same as train metrics
+```{r for_eval ,echo=FALSE}
 test_data_baked <- bake(lr_recipe2_prepped, new_data = test_data)
+
 test_predictions <- predict(forward_step_model, newdata = test_data_baked)
 
+
+
 evaluation_table <- data.frame(
-    actual = test_data_baked$ConvertedCompYearly,
-    predicted = test_predictions
+  actual = test_data_baked$ConvertedCompYearly,
+  predicted = test_predictions
 )
 
+library(yardstick)
 metrics <- evaluation_table %>%
-    metrics(truth = actual, estimate = predicted)
+  metrics(truth = actual, estimate = predicted)
 
-metrics
+
+
+print(metrics)
 ```
-
-The scatter plot below summarizes the test-set fit after selection.
-
-```{r forward_plot, echo=FALSE}
+The same issue with small salaries appears in the graph, just like in the SVM graph
+```{r for_graph2 ,echo=FALSE}
 ggplot(evaluation_table, aes(x = actual, y = predicted)) +
-    geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
-    geom_point(alpha = 0.1, color = "midnightblue") +
-    labs(
-        title = "Actual vs Predicted Salary (Forward Selection)",
-        subtitle = "Log-transformed Scale (test)",
-        x = "Actual Salary (Log)",
-        y = "Predicted Salary (Log)"
-    ) +
-    theme_minimal()
+  geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
+  geom_point(alpha = 0.1, color = "midnightblue") +
+  labs(
+    title = "Actual vs Predicted Salary (Forward Selection)",
+    subtitle = "Log-transformed Scale (test)",
+    x = "Actual Salary (Log)",
+    y = "Predicted Salary (Log)"
+  ) +
+  theme_minimal()
 ```
 
 # Lasso
-
-We fit a lasso regression with the same preprocessing steps as forward selection. The penalty is kept fixed.
-This lets us shrink coefficients while keeping the recipe identical for comparison.
-
-```{r lasso_recipe}
+The next model we've chosen is Lasso method with Linear Regression.
+The process will be pretty much the same.
+Prepare data
+```{r las_recipe}
 lr_recipe_lasso <- final_recipe %>%
-    step_naomit(has_role("outcome")) %>%
-    step_log(ConvertedCompYearly, base = 10) %>%
-    step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
-    step_rm(Age, YearsCode) %>%
-    step_dummy(has_role("nominal"), one_hot = FALSE) %>%
-    step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
-    step_ordinalscore(has_role("ordinal"), -c("JobSat"))  %>%
-    step_corr(all_numeric_predictors(), threshold = 0.7) %>%
-    step_normalize(all_numeric_predictors())
+  step_naomit(has_role("outcome")) %>%
+  step_log(ConvertedCompYearly, base = 10) %>%
+  step_rm(-has_role("numeric"), -has_role("ordinal"), -has_role("nominal"), -has_role("outcome")) %>%
+  step_rm(Age, YearsCode) %>%
+  step_dummy(has_role("nominal"), one_hot = FALSE) %>%
+  step_rm("Industry_Higher.Education", "MainBranch_Occasional") %>%
+  step_ordinalscore(has_role("ordinal"), -c("JobSat"))  %>%
+  step_corr(all_numeric_predictors(), threshold = 0.7) %>%
+  step_normalize(all_numeric_predictors())
 ```
 
-```{r lasso_workflow}
+model with best paraemters
+```{r las_model}
 lasso_spec <- linear_reg(
-    penalty = 0.01,
-    mixture = 1
+  penalty = 0.01, 
+  mixture = 1     
 ) %>%
-    set_engine("glmnet") %>%
-    set_mode("regression")
-
+  set_engine("glmnet") %>%
+  set_mode("regression")
+```
+The metric rsq is a little smaller, and the error is a little larger
+```{r lasso_eval}
 workflow() %>%
-    add_recipe(lr_recipe_lasso) %>%
-    add_model(lasso_spec) %>%
-    last_fit(data_split) -> lasso_fit_result
+  add_recipe(lr_recipe_lasso) %>%
+  add_model(lasso_spec) %>%
+  last_fit(data_split) -> lasso_fit_result
+
 
 lasso_fit_result %>% collect_metrics()
-```
 
-We show both the prediction scatter and the residuals to match the linear regression section.
-
-```{r lasso_plot, echo=FALSE}
 lasso_predictions <- lasso_fit_result %>% collect_predictions()
-
+```
+The same issue with small salaries appears in the graph, just like in the SVM and Forward graphs
+```{r lasso_graph1 ,echo=FALSE}
 ggplot(lasso_predictions, aes(x = ConvertedCompYearly, y = .pred)) +
-    geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
-    geom_point(alpha = 0.2, color = "darkgreen") +
-    labs(
-        title = "Actual vs Predicted Salary (Lasso Regression)",
-        subtitle = "Log-transformed Scale, Penalty = 0.01",
-        x = "Actual Salary (Log)",
-        y = "Predicted Salary (Log)"
-    ) +
-    theme_minimal()
+  geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
+  geom_point(alpha = 0.2, color = "darkgreen") +
+  labs(
+    title = "Actual vs Predicted Salary (Lasso Regression) ",
+    subtitle = "Log-transformed Scale, Penalty = 0.01",
+    x = "Actual Salary (Log)",
+    y = "Predicted Salary (Log)"
+  ) +
+  theme_minimal()
+```
+We see larger deviations at the ends, especially with small salaries.
+The blue line is not as straight as in the SVM and Forward graphs.
+The residuals display a diamond-shaped distribution, indicating heteroscedasticity
+```{r lasso_graph2,echo=FALSE}
+lasso_predictions %>%
+  mutate(.resid = ConvertedCompYearly - .pred) %>%
+  ggplot(aes(x = .pred, y = .resid)) +
+  geom_point(alpha = 0.4, color = "gray50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+  geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+  labs(
+    title = "Residual vs. Fitted Plot Lasso",
+    subtitle = "Checking for homoscedasticity and linearity",
+    x = "Predicted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+```
+40 features.
+the Forward method seems to be more stable than Lasso because Lasso is more harsh
+and focus only on big signals
+```{r lasso_features,echo=FALSE}
+model_obj <- lasso_fit_result %>% 
+  extract_fit_parsnip()
+
+importance_df <- tidy(model_obj) %>%
+  filter(term != "(Intercept)") %>%
+  filter(estimate != 0) %>%
+  mutate(abs_importance = abs(estimate)) %>%
+  arrange(desc(abs_importance))
+
+
+nrow(importance_df)
+print(importance_df)
+
+top_20 <- importance_df %>%
+  slice_max(abs(estimate), n = 20) %>%
+  mutate(term = reorder(term, estimate))
+
+ggplot(top_20, aes(x = estimate, y = term, fill = estimate > 0)) +
+  geom_col() +
+  scale_fill_manual(
+    values = c("firebrick", "steelblue"), 
+    labels = c("Negative Impact", "Positive Impact")
+  ) +
+  labs(
+    title = "Top 20 Feature Importance (Lasso)",
+    subtitle = "Log-Coefficient Impact on Salary",
+    x = "Model Coefficient (Estimate)",
+    y = NULL,
+    fill = "Impact Direction"
+  ) +
+  theme_minimal()
 ```
 
-```{r lasso_residual, echo=FALSE}
-lasso_predictions %>%
-    mutate(.resid = ConvertedCompYearly - .pred) %>%
-    ggplot(aes(x = .pred, y = .resid)) +
-    geom_point(alpha = 0.4, color = "gray50") +
-    geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
-    geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
-    labs(
-        title = "Residual vs. Fitted Plot Lasso",
-        subtitle = "Checking for homoscedasticity and linearity",
-        x = "Predicted Values",
-        y = "Residuals"
-    ) +
-    theme_minimal()
-```
 
 # Ridge
 
-The ridge model uses the same recipe as lasso, but with an $\ell_2$ penalty.
-This keeps all predictors while still regularizing the coefficients.
-
-```{r ridge_workflow}
+The process will be pretty much the same but with Ridge method in Linear Regression .
+model with the best parameters
+```{r ridge_model}
 ridge_spec <- linear_reg(
-    penalty = 0.01,
-    mixture = 0
+  penalty = 0.01, 
+  mixture = 0     
 ) %>%
-    set_engine("glmnet") %>%
-    set_mode("regression")
+  set_engine("glmnet") %>%
+  set_mode("regression")
 
 workflow() %>%
-    add_recipe(lr_recipe_lasso) %>%
-    add_model(ridge_spec) %>%
-    last_fit(data_split) -> ridge_fit_result
-
+  add_recipe(lr_recipe_lasso) %>%
+  add_model(ridge_spec) %>%
+  last_fit(data_split) -> ridge_fit_result
+```
+metrics are very smilar to SVM and Forward
+```{r ridge_metrics}
 ridge_fit_result %>% collect_metrics()
-```
 
-The plots below mirror the lasso outputs for a direct visual comparison.
-
-```{r ridge_plot, echo=FALSE}
 ridge_predictions <- ridge_fit_result %>% collect_predictions()
-
+```
+The same issue with small salaries appears in the graph, just like in the SVM and Forward and Lasso graphs
+```{r ridge_graph1,echo=FALSE}
 ggplot(ridge_predictions, aes(x = ConvertedCompYearly, y = .pred)) +
-    geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
-    geom_point(alpha = 0.2, color = "darkgreen") +
-    labs(
-        title = "Actual vs Predicted Salary (Ridge Regression)",
-        subtitle = "Log-transformed Scale, Penalty = 0.01",
-        x = "Actual Salary (Log)",
-        y = "Predicted Salary (Log)"
-    ) +
-    theme_minimal()
+  geom_abline(intercept = 0, slope = 1, lty = 2, color = "red", linewidth = 0.8) +
+  geom_point(alpha = 0.2, color = "darkgreen") +
+  labs(
+    title = "Actual vs Predicted Salary (Ridge Regression) ",
+    subtitle = "Log-transformed Scale, Penalty = 0.01",
+    x = "Actual Salary (Log)",
+    y = "Predicted Salary (Log)"
+  ) +
+  theme_minimal()
 ```
-
-```{r ridge_residual, echo=FALSE}
+The line seems to be the same as in the SVM and Forward graphs.
+We don't see any difference. The graph also indicates slight heteroscedasticity, and the line is less straight at the edges.
+```{r ridge_graph2,echo=FALSE}
 ridge_predictions %>%
-    mutate(.resid = ConvertedCompYearly - .pred) %>%
-    ggplot(aes(x = .pred, y = .resid)) +
-    geom_point(alpha = 0.4, color = "gray50") +
-    geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
-    geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
-    labs(
-        title = "Residual vs. Fitted Plot Ridge",
-        subtitle = "Checking for homoscedasticity and linearity",
-        x = "Predicted Values",
-        y = "Residuals"
-    ) +
-    theme_minimal()
+  mutate(.resid = ConvertedCompYearly - .pred) %>%
+  ggplot(aes(x = .pred, y = .resid)) +
+  geom_point(alpha = 0.4, color = "gray50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red3", linewidth = .7) +
+  geom_smooth(method = "loess", formula = y ~ x, color = "blue3", se = FALSE) +
+  labs(
+    title = "Residual vs. Fitted Plot Ridge",
+    subtitle = "Checking for homoscedasticity and linearity",
+    x = "Predicted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
 ```
 
+90 features
+```{r ridge_features,echo=FALSE}
+model_obj <- ridge_fit_result %>% 
+  extract_fit_parsnip()
 
+importance_df <- tidy(model_obj) %>%
+  filter(term != "(Intercept)") %>%
+  filter(estimate != 0) %>%
+  mutate(abs_importance = abs(estimate)) %>%
+  arrange(desc(abs_importance))
+
+nrow(importance_df)
+print(importance_df)
+
+top_20 <- importance_df %>%
+  slice_max(abs(estimate), n = 20) %>%
+  mutate(term = reorder(term, estimate))
+top_20 
+
+
+ggplot(top_20, aes(x = estimate, y = term, fill = estimate > 0)) +
+  geom_col() +
+  scale_fill_manual(
+    values = c("firebrick", "steelblue"), 
+    labels = c("Negative Impact", "Positive Impact")
+  ) +
+  labs(
+    title = "Top 20 Feature Importance (Ridge)",
+    subtitle = "Log-Coefficient Impact on Salary",
+    x = "Model Coefficient (Estimate)",
+    y = NULL,
+    fill = "Impact Direction"
+  ) +
+  theme_minimal()
+```
+In 2 scenario, all three chosen methods performed well, showing similar rsq and rmse values.
+Lasso had slightly worse metrics because it is a very strict and harsh method,
+and maybe because it selected only 40 features, the smallest number.
+Looking at the top 20 variables by importance, we can see that Lasso
+and Ridge have similar top 20 features.
+Forward selection has the same first 10 features as the previous two methods,
+but the next 10 are somewhat different.
+This can be explained by the fact that only a few features have large coefficients, while others have similar values.
+Therefore, it depends on the method which features are selected.
+
+The top 20 features always include county_usa, probably because we have the most records for this country.
+At the same time, salaries are generally higher in the USA.
+Other important features include worexp (work experience), orgsize (organization size), and some variables related to degree. Country_Switzerland also appears frequently.
+Negative predictors often include country india, likely due to the generally lower salaries there, as well as country_ukraine, for similar reasons, and country_brazil.
+Features such as student and work_in_person also appear.
+All of these features seem to be reasonably chosen.
