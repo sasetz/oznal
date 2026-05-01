@@ -699,9 +699,8 @@ ui <- page_navbar(
             forward_page,
             lasso_page,
             ridge_page
-        )), 
-    nav_panel("Take the survey", "Page C content"), 
-    title = "Elements of AI, Anna Pylypenko & Kirill Putiatin", 
+        )),
+    title = "Capstone Project, Anna Pylypenko & Kirill Putiatin", 
     id = "main_page",
 )
 
